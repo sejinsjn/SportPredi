@@ -498,6 +498,7 @@ private fun FixturesScreen(
         .collectAsState(initial = emptyList())
     var coverageRows by remember { mutableStateOf(emptyList<SeasonCoverageRow>()) }
     var selectedFixture by remember { mutableStateOf<FixtureDisplay?>(null) }
+    var showFixturesInfo by remember { mutableStateOf(false) }
     LaunchedEffect(database, lastUpdated, coverageRefresh) {
         coverageRows = withContext(Dispatchers.IO) { dao.seasonCoverage() }
     }
@@ -516,31 +517,16 @@ private fun FixturesScreen(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Text("Kommende Spiele", style = MaterialTheme.typography.headlineMedium)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text("Kommende Spiele", style = MaterialTheme.typography.headlineMedium)
+            TextButton(onClick = { showFixturesInfo = true }) {
+                Text("Info")
+            }
+        }
         Text("Letzte lokale Aktualisierung: ${formatTimestamp(lastUpdated)}")
-        Text(
-            "Quellen: OpenLigaDB, OpenFootball football.json (CC0) und ein ausgewählter historischer " +
-                "StatsBomb-Datensatz. Nur tatsächlich verfügbare Wettbewerbe werden angezeigt. " +
-                "Der versionierte Bestand wird offline importiert; Live-Aktualisierungen bleiben auf " +
-                "20 Spielzeiten bzw. Dateien je Sync begrenzt.",
-            style = MaterialTheme.typography.bodySmall,
-        )
-        Text(
-            "Für kommende Spiele sind xG, Schüsse, Ballbesitz, bestätigte Aufstellungen und Verletzungen " +
-                "weiterhin nicht verfügbar. StatsBomb enthält Werte nur für ausgewählte historische Spiele.",
-            style = MaterialTheme.typography.bodySmall,
-        )
-        Text(
-            "Standardansicht: alle aktuell verfügbaren Wettbewerbe; im Saisonfilter ${currentSeasonLabel} " +
-                "bis ${currentSeasonEnd}. Die Abdeckung hängt von den Datenquellen ab.",
-            style = MaterialTheme.typography.bodySmall,
-        )
-        Text(
-            "Modelltipps vergleichen 1X2, Beide Teams treffen und Über/Unter 1,5 bzw. 2,5 Tore. " +
-                "Doppelte Chance und extreme Torlinien werden ausgeschlossen. Quoten und erwarteter " +
-                "Gewinn werden nicht berechnet; daraus folgt keine Gewinngarantie.",
-            style = MaterialTheme.typography.bodySmall,
-        )
         Text(syncMessage, style = MaterialTheme.typography.bodySmall)
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -658,6 +644,48 @@ private fun FixturesScreen(
     }
     selectedFixture?.let { fixture ->
         FixtureDetailsDialog(fixture, dao) { selectedFixture = null }
+    }
+    if (showFixturesInfo) {
+        AlertDialog(
+            onDismissRequest = { showFixturesInfo = false },
+            title = { Text("Info zu kommenden Spielen") },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .heightIn(max = 420.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(
+                        "Quellen: OpenLigaDB, OpenFootball football.json (CC0) und ein ausgewählter " +
+                            "historischer StatsBomb-Datensatz. Nur tatsächlich verfügbare Wettbewerbe " +
+                            "werden angezeigt. Der versionierte Bestand wird offline importiert; " +
+                            "Live-Aktualisierungen bleiben auf 20 Spielzeiten bzw. Dateien je Sync begrenzt.",
+                    )
+                    Text(
+                        "Zusätzliche xG-, Schuss-, Ballbesitz-, Aufstellungs- und Verletzungsdaten können " +
+                            "über API-Football verfügbar sein. Das hängt von Wettbewerb und Tarif ab. " +
+                            "Sie werden angezeigt, fließen derzeit aber nicht in die Prognose ein. " +
+                            "StatsBomb enthält Werte nur für ausgewählte historische Spiele.",
+                    )
+                    Text(
+                        "Standardansicht: alle aktuell verfügbaren Wettbewerbe; Saison " +
+                            "$currentSeasonLabel bis $currentSeasonEnd. Die Abdeckung hängt von den Datenquellen ab.",
+                    )
+                    Text(
+                        "Modelltipps vergleichen 1X2, Beide Teams treffen und Über/Unter 1,5 bzw. " +
+                            "2,5 Tore. Doppelte Chance und extreme Torlinien werden ausgeschlossen. " +
+                            "Ein Quoten-Tipp erscheint nur bei vorhandener Quote ab 1,50 und positivem " +
+                            "modelliertem Erwartungswert; das ist keine Gewinngarantie oder Wettberatung.",
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showFixturesInfo = false }) {
+                    Text("Schließen")
+                }
+            },
+        )
     }
 }
 
