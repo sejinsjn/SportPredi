@@ -34,6 +34,14 @@ class ApiFootballFixtureQueryTest {
     }
 
     @Test
+    fun headToHeadQueryUsesStableTeamPairAndLookbackWithoutLeagueFilters() {
+        assertEquals(
+            linkedMapOf("h2h" to "33-44", "last" to "10"),
+            apiFootballHeadToHeadQueryParameters(33, 44),
+        )
+    }
+
+    @Test
     fun firstSeasonBackfillRequestsLeagueSeasonOnlyForFullLocalHistory() {
         assertEquals(
             linkedMapOf("league" to "39", "season" to "2026"),

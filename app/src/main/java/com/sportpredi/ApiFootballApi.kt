@@ -219,6 +219,19 @@ internal fun apiFootballFixtureQueryParameters(
     }
 }
 
+internal fun apiFootballHeadToHeadQueryParameters(
+    homeTeamId: Int,
+    awayTeamId: Int,
+    last: Int = 10,
+): Map<String, String> {
+    require(homeTeamId > 0 && awayTeamId > 0 && homeTeamId != awayTeamId)
+    require(last > 0)
+    return linkedMapOf(
+        "h2h" to "$homeTeamId-$awayTeamId",
+        "last" to last.toString(),
+    )
+}
+
 internal fun apiFootballCurrentFixtureQueryParameters(
     leagueId: Int,
     seasonYear: Int,
@@ -252,6 +265,12 @@ interface ApiFootballApi {
 
     @GET("fixtures")
     suspend fun fixtures(
+        @Header("x-apisports-key") apiKey: String,
+        @QueryMap query: Map<String, String>,
+    ): Response<ApiFootballResponse<ApiFootballFixtureDto>>
+
+    @GET("fixtures/headtohead")
+    suspend fun headToHead(
         @Header("x-apisports-key") apiKey: String,
         @QueryMap query: Map<String, String>,
     ): Response<ApiFootballResponse<ApiFootballFixtureDto>>

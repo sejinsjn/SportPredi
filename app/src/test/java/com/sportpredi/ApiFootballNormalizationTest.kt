@@ -63,6 +63,41 @@ class ApiFootballNormalizationTest {
         assertEquals("api-football:39:2025", normalized.single().seasonId)
     }
 
+    @Test
+    fun headToHeadNormalizationKeepsOnlyCompletedMeetingsBeforeTheUpcomingMatch() {
+        val expected = remoteFixture().copy(
+            fixture = remoteFixture().fixture.copy(date = "2026-09-20T18:00:00+00:00"),
+        )
+        val wrongOpponent = remoteFixture().copy(
+            fixture = remoteFixture().fixture.copy(id = 345679, date = "2026-09-21T18:00:00+00:00"),
+            teams = ApiFootballTeamsDto(
+                home = ApiFootballTeamDto(33, "Home"),
+                away = ApiFootballTeamDto(55, "Other"),
+            ),
+        )
+        val upcoming = remoteFixture().copy(
+            fixture = remoteFixture().fixture.copy(id = 345680, date = "2026-10-25T18:00:00+00:00"),
+        )
+        val unfinished = remoteFixture().copy(
+            fixture = remoteFixture().fixture.copy(
+                id = 345681,
+                date = "2026-09-22T18:00:00+00:00",
+                status = ApiFootballStatusDto("NS"),
+            ),
+            goals = null,
+        )
+
+        val matches = normalizeApiFootballHeadToHead(
+            listOf(expected, wrongOpponent, upcoming, unfinished),
+            homeTeamId = 33,
+            awayTeamId = 44,
+            beforeDate = "2026-10-24",
+            updatedAt = "2026-10-23T00:00:00Z",
+        )
+
+        assertEquals(listOf(345678L), matches.map { it.providerFixtureId })
+    }
+
     private fun remoteFixture() = ApiFootballFixtureDto(
         fixture = ApiFootballFixtureInfoDto(
             id = 345678,

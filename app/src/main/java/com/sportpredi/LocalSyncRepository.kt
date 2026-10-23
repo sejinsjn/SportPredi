@@ -206,6 +206,27 @@ internal fun normalizeApiFootballFixtures(
             )
         }
 
+internal fun normalizeApiFootballHeadToHead(
+    items: List<ApiFootballFixtureDto>,
+    homeTeamId: Int,
+    awayTeamId: Int,
+    beforeDate: String,
+    updatedAt: String,
+): List<FixtureEntity> =
+    normalizeApiFootballFixtures(items, updatedAt)
+        .filter { fixture ->
+            fixture.matchDate < beforeDate &&
+                    fixture.fullTimeResult &&
+                    fixture.homeScore != null &&
+                    fixture.awayScore != null &&
+                    (
+                        (fixture.homeTeamId == homeTeamId && fixture.awayTeamId == awayTeamId) ||
+                            (fixture.homeTeamId == awayTeamId && fixture.awayTeamId == homeTeamId)
+                        )
+        }
+        .sortedWith(compareByDescending<FixtureEntity> { it.matchDate }.thenByDescending { it.kickoffAt.orEmpty() })
+        .take(10)
+
 object ApiFootballSyncDefaults {
     const val MAX_REQUESTS_PER_SYNC = 32
     const val MAX_REQUESTS_PER_UTC_DAY = 6_500
@@ -395,6 +416,143 @@ class LocalSyncRepository(
     private val limits: ApiFootballSyncLimits = ApiFootballSyncLimits(),
 ) {
     private val dao = database.sportPrediDao()
+
+    suspend fun synchronizeHeadToHead(
+        apiKey: String,
+        homeTeamId: Int,
+        awayTeamId: Int,
+        beforeDate: String,
+    ): List<FixtureEntity> = syncMutex.withLock {
+        val existing = dao.headToHead(
+            homeTeamId = homeTeamId,
+            awayTeamId = awayTeamId,
+            beforeDate = beforeDate,
+            limit = HEAD_TO_HEAD_LOOKBACK,
+        )
+        if (existing.size >= HEAD_TO_HEAD_LOOKBACK) return@withLock existing
+
+        val now = Instant.now()
+        val pairKey = listOf(homeTeamId, awayTeamId).sorted().joinToString("-")
+        val cacheKey = "$HEAD_TO_HEAD_CACHE_PREFIX$pairKey"
+        val cachedAt = dao.syncMetadata(cacheKey)?.value
+        if (
+            cachedAt != null &&
+            apiFootballStandingsCacheIsFresh(cachedAt, now, HEAD_TO_HEAD_CACHE_TTL)
+        ) {
+            return@withLock existing
+        }
+        if (apiKey.isBlank()) {
+            throw ApiFootballProviderException("API-Football-Schlüssel fehlt. Bitte unter Einstellungen eintragen.")
+        }
+
+        val statusResponse = api.status(apiKey)
+        if (!statusResponse.isSuccessful) throw HttpException(statusResponse)
+        val statusHeaders = parseApiFootballRateLimitHeaders(statusResponse.headers())
+            ?: throw ApiFootballProviderException(
+                "API-Football-Status enthält keine vollständigen Rate-Limit-Header; " +
+                    "die Anfrage nach direkten Duellen wurde sicherheitshalber angehalten.",
+            )
+        val statusBody = statusResponse.body()
+            ?: throw ApiFootballProviderException("API-Football-Status lieferte eine leere Antwort.")
+        validateProviderResponse(statusBody.errors)
+        val usage = statusBody.response?.requests
+            ?: throw ApiFootballProviderException("API-Football-Status enthält keine Tagesnutzung.")
+        val current = usage.current
+            ?: throw ApiFootballProviderException("API-Football-Status enthält keine aktuelle Tagesnutzung.")
+        val providerDailyLimit = usage.limitDay
+            ?: throw ApiFootballProviderException("API-Football-Status enthält kein Tageslimit.")
+        val dailyRemaining = minOf(
+            statusHeaders.dailyRemaining,
+            (minOf(providerDailyLimit, statusHeaders.dailyLimit) - current).coerceAtLeast(0),
+        )
+        if (safeApiFootballRequestSlots(dailyRemaining, limits.dailyRequestReserve) <= 0) {
+            throw ApiFootballRequestLimitException(
+                "API-Football-Tageslimit erreicht oder Sicherheitsabstand von " +
+                    "${limits.dailyRequestReserve} Aufrufen erreicht.",
+            )
+        }
+        if (
+            safeApiFootballRequestSlots(
+                statusHeaders.perMinuteRemaining,
+                limits.perMinuteRequestReserve,
+            ) <= 0
+        ) {
+            throw ApiFootballRequestLimitException(
+                "API-Football-Minutenlimit erreicht oder Sicherheitsabstand erreicht.",
+            )
+        }
+
+        val requestDay = LocalDate.now(ZoneOffset.UTC).toString()
+        val previousUsage = dao.syncMetadata(DAILY_REQUESTS_KEY)?.value.orEmpty().split('|')
+        val usedToday = if (previousUsage.size == 2 && previousUsage[0] == requestDay) {
+            previousUsage[1].toIntOrNull() ?: 0
+        } else {
+            0
+        }
+        if (usedToday >= limits.maxRequestsPerUtcDay) {
+            throw ApiFootballRequestLimitException(
+                "Das lokale Tageslimit von ${limits.maxRequestsPerUtcDay} API-Aufrufen wurde erreicht.",
+            )
+        }
+        dao.upsertSyncMetadata(
+            SyncMetadataEntity(DAILY_REQUESTS_KEY, "$requestDay|${usedToday + 1}"),
+        )
+
+        val response = api.headToHead(
+            apiKey,
+            apiFootballHeadToHeadQueryParameters(homeTeamId, awayTeamId, HEAD_TO_HEAD_LOOKBACK),
+        )
+        if (!response.isSuccessful) throw HttpException(response)
+        parseApiFootballRateLimitHeaders(response.headers())
+            ?: throw ApiFootballProviderException(
+                "API-Football-Antwort enthält keine vollständigen Rate-Limit-Header.",
+            )
+        val body = response.body()
+            ?: throw ApiFootballProviderException("API-Football lieferte eine leere H2H-Antwort.")
+        validateProviderResponse(body.errors)
+
+        val fetchedAt = Instant.now().toString()
+        val matchingFixtures = normalizeApiFootballHeadToHead(
+            items = body.response.orEmpty(),
+            homeTeamId = homeTeamId,
+            awayTeamId = awayTeamId,
+            beforeDate = beforeDate,
+            updatedAt = fetchedAt,
+        )
+        val matchingFixtureIds = matchingFixtures.map { it.providerFixtureId }.toSet()
+        val matchingDtos = body.response.orEmpty()
+            .filter { dto -> dto.fixture.id.toLong() in matchingFixtureIds }
+        val competitions = matchingDtos
+            .map { dto ->
+                CompetitionEntity(
+                    providerCode = "api-football:${dto.league.id}",
+                    providerId = dto.league.id,
+                    name = dto.league.name,
+                    country = dto.league.country.orEmpty(),
+                    updatedAt = fetchedAt,
+                )
+            }
+            .distinctBy { it.providerCode }
+        val teams = matchingDtos.flatMap { dto ->
+            listOfNotNull(
+                dto.teams.home?.id?.let { TeamEntity(it, dto.teams.home.name.orEmpty()) },
+                dto.teams.away?.id?.let { TeamEntity(it, dto.teams.away.name.orEmpty()) },
+            )
+        }.distinctBy { it.providerTeamId }
+
+        database.withTransaction {
+            if (competitions.isNotEmpty()) dao.upsertCompetitions(competitions)
+            if (teams.isNotEmpty()) dao.upsertTeams(teams)
+            if (matchingFixtures.isNotEmpty()) dao.upsertFixtures(matchingFixtures)
+            dao.upsertSyncMetadata(SyncMetadataEntity(cacheKey, fetchedAt))
+        }
+        dao.headToHead(
+            homeTeamId = homeTeamId,
+            awayTeamId = awayTeamId,
+            beforeDate = beforeDate,
+            limit = HEAD_TO_HEAD_LOOKBACK,
+        )
+    }
 
     suspend fun synchronize(
         apiKey: String,
@@ -862,6 +1020,9 @@ class LocalSyncRepository(
         private const val SYNC_KEY = "lastApiFootballSyncAt"
         private const val ATTEMPT_KEY = "lastApiFootballAttemptAt"
         private const val DAILY_REQUESTS_KEY = "apiFootballRequestsToday"
+        private const val HEAD_TO_HEAD_CACHE_PREFIX = "apiFootballHeadToHead:"
+        private const val HEAD_TO_HEAD_LOOKBACK = 10
+        private val HEAD_TO_HEAD_CACHE_TTL = Duration.ofDays(7)
         private val syncMutex = Mutex()
     }
 }

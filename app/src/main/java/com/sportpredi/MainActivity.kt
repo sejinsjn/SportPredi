@@ -278,6 +278,8 @@ private fun AppScreen(database: SportPrediDatabase) {
         when (selectedPage) {
             AppPage.FIXTURES -> FixturesScreen(
                 database = database,
+                syncRepository = syncRepository,
+                apiKey = apiCredentialsStore.load().apiFootballKey,
                 lastUpdated = lastUpdated,
                 coverageRefresh = coverageRefresh,
                 syncMessage = syncMessage,
@@ -527,6 +529,8 @@ private fun SettingsScreen(
 @Composable
 private fun FixturesScreen(
     database: SportPrediDatabase,
+    syncRepository: LocalSyncRepository,
+    apiKey: String,
     lastUpdated: String?,
     coverageRefresh: Int,
     syncMessage: String,
@@ -602,6 +606,8 @@ private fun FixturesScreen(
         FixtureDetailsScreen(
             display = selectedFixture!!,
             dao = dao,
+            syncRepository = syncRepository,
+            apiKey = apiKey,
             onBack = { selectedFixture = null },
         )
     } else {
@@ -1083,7 +1089,9 @@ private data class FixtureDetailsData(
     val homeHistory: List<FixtureEntity>,
     val awayHistory: List<FixtureEntity>,
     val headToHead: List<FixtureEntity>,
+    val headToHeadError: String?,
     val teamNames: Map<Int, String>,
+    val competitionNames: Map<String, String>,
     val standingsCached: Boolean,
     val standings: List<ApiFootballStandingRow>,
 )
@@ -1102,6 +1110,8 @@ private data class LocalStanding(
 private fun FixtureDetailsScreen(
     display: FixtureDisplay,
     dao: SportPrediDao,
+    syncRepository: LocalSyncRepository,
+    apiKey: String,
     onBack: () -> Unit,
 ) {
     var details by remember(display.providerFixtureId) { mutableStateOf<FixtureDetailsData?>(null) }
@@ -1143,7 +1153,6 @@ private fun FixtureDetailsScreen(
                     ?: error("Die Heimmannschaft ist noch nicht zugeordnet.")
                 val awayId = match.awayTeamId
                     ?: error("Die Auswärtsmannschaft ist noch nicht zugeordnet.")
-                val teams = dao.allTeams().associate { it.providerTeamId to it.name }
                 val standingsCache = dao.apiFootballStandings(match.seasonId)
                 val standings = standingsCache?.let { cache ->
                     runCatching {
@@ -1152,6 +1161,27 @@ private fun FixtureDetailsScreen(
                             .orEmpty()
                     }.getOrDefault(emptyList())
                 }.orEmpty()
+                val localHeadToHead = dao.headToHead(
+                    homeId,
+                    awayId,
+                    match.matchDate,
+                    HEAD_TO_HEAD_LOOKBACK,
+                )
+                var headToHeadError: String? = null
+                val headToHead = try {
+                    syncRepository.synchronizeHeadToHead(
+                        apiKey = apiKey,
+                        homeTeamId = homeId,
+                        awayTeamId = awayId,
+                        beforeDate = match.matchDate,
+                    )
+                } catch (exception: Exception) {
+                    if (exception is CancellationException) throw exception
+                    headToHeadError = syncFailureMessage(exception)
+                    localHeadToHead
+                }
+                val teams = dao.allTeams().associate { it.providerTeamId to it.name }
+                val competitions = dao.allCompetitions().associate { it.providerCode to it.name }
                 FixtureDetailsData(
                     fixture = match,
                     homeTeamName = teams[homeId] ?: display.homeTeamName ?: "Heimteam",
@@ -1166,14 +1196,10 @@ private fun FixtureDetailsScreen(
                         match.matchDate,
                         DETAIL_HISTORY_LIMIT,
                     ),
-                    headToHead = dao.headToHead(
-                        match.competitionCode,
-                        homeId,
-                        awayId,
-                        match.matchDate,
-                        DETAIL_HISTORY_LIMIT,
-                    ),
+                    headToHead = headToHead,
+                    headToHeadError = headToHeadError,
                     teamNames = teams,
+                    competitionNames = competitions,
                     standingsCached = standingsCache != null,
                     standings = standings,
                 )
@@ -1367,14 +1393,21 @@ private fun FixtureDetailsScreen(
                 }
                 HorizontalDivider()
                 Text("Direkte Duelle", style = MaterialTheme.typography.labelLarge)
+                data.headToHeadError?.let {
+                    Text(
+                        "Direkte Duelle konnten nicht aktualisiert werden: $it",
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
                 if (data.headToHead.isEmpty()) {
-                    Text("Keine direkten Duelle in den lokal gespeicherten Daten.")
+                    Text("Keine direkten Duelle in den verfügbaren API- oder lokalen Daten.")
                 } else {
                     data.headToHead.forEach { match ->
                         Text(
                             "${match.matchDate} · ${data.teamNames[match.homeTeamId] ?: "TBD"} " +
                                 "${match.homeScore}:${match.awayScore} " +
-                                "${data.teamNames[match.awayTeamId] ?: "TBD"}",
+                                "${data.teamNames[match.awayTeamId] ?: "TBD"} · " +
+                                (data.competitionNames[match.competitionCode] ?: "Wettbewerb unbekannt"),
                         )
                     }
                 }
@@ -1579,6 +1612,7 @@ private fun calculateStandings(fixtures: List<FixtureEntity>): List<LocalStandin
 }
 
 private const val DETAIL_HISTORY_LIMIT = 10
+private const val HEAD_TO_HEAD_LOOKBACK = 10
 
 @Composable
 private fun PerformanceScreen(database: SportPrediDatabase) {

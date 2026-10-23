@@ -308,7 +308,7 @@ interface SportPrediDao {
     @Query(
         """
         SELECT * FROM fixtures
-        WHERE competitionCode = :competitionCode AND matchDate < :beforeDate
+        WHERE matchDate < :beforeDate
           AND fullTimeResult = 1 AND homeScore IS NOT NULL AND awayScore IS NOT NULL
           AND (
             (homeTeamId = :homeTeamId AND awayTeamId = :awayTeamId)
@@ -319,7 +319,6 @@ interface SportPrediDao {
         """
     )
     suspend fun headToHead(
-        competitionCode: String,
         homeTeamId: Int,
         awayTeamId: Int,
         beforeDate: String,
