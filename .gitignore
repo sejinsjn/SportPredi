@@ -1,0 +1,13 @@
+.env
+*.db
+__pycache__/
+*.py[cod]
+.gradle/
+.kotlin/
+.idea/
+*.iml
+local.properties
+**/build/
+.externalNativeBuild/
+.cxx/
+captures/
