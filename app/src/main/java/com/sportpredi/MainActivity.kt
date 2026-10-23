@@ -28,6 +28,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -45,6 +46,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.google.gson.Gson
@@ -1006,6 +1009,18 @@ private fun FixtureCard(fixture: FixtureDisplay, onClick: () -> Unit) {
     val valueTip = remember(analysis?.scoreDistribution, odds) {
         analysis?.let { highestProbabilityPositiveValueTip(it.scoreDistribution, odds) }
     }
+    val statusLabel = when {
+        fixture.status == "CANCELLED" -> "Abgesagt"
+        fixture.postponedOrCancelled -> "Verschoben"
+        fixture.rescheduled -> "Neu terminiert"
+        fixture.homeScore != null && fixture.awayScore != null -> "Beendet"
+        else -> "Anstehend"
+    }
+    val statusColor = when {
+        fixture.status == "CANCELLED" -> MaterialTheme.colorScheme.error
+        fixture.postponedOrCancelled -> MaterialTheme.colorScheme.tertiary
+        else -> MaterialTheme.colorScheme.secondary
+    }
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -1013,72 +1028,154 @@ private fun FixtureCard(fixture: FixtureDisplay, onClick: () -> Unit) {
     ) {
         Column(
             modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "${fixture.country ?: "Land unbekannt"} · ${fixture.competitionName ?: "Wettbewerb unbekannt"}",
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.titleSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    statusLabel,
+                    modifier = Modifier.padding(start = 8.dp),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = statusColor,
+                )
+            }
             Text(
-                "${fixture.country ?: "Land unbekannt"} · ${fixture.competitionName ?: "Wettbewerb unbekannt"}",
-                style = MaterialTheme.typography.titleSmall,
+                fixture.kickoffAt?.let(::formatTimestamp) ?: fixture.matchDate,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Text(
-                "${fixture.homeTeamName ?: "TBD"} – ${fixture.awayTeamName ?: "TBD"}",
-                style = MaterialTheme.typography.titleMedium,
-            )
-            Text(fixture.kickoffAt?.let(::formatTimestamp) ?: fixture.matchDate)
-            fixture.seasonYear?.let { Text("Saison $it") }
-            fixture.matchday?.let { Text("Spieltag $it") }
-            fixture.venue?.takeIf(String::isNotBlank)?.let { Text(it) }
-            Text("Tippen für Statistiken und Prognoseanalyse", style = MaterialTheme.typography.bodySmall)
-            if (fixture.postponedOrCancelled) {
-                Text(if (fixture.status == "CANCELLED") "Abgesagt" else "Verschoben")
-            } else if (fixture.rescheduled) {
-                Text("Neu terminiert")
-            } else if (fixture.homeScore != null && fixture.awayScore != null) {
-                Text("Ergebnis: ${fixture.homeScore} : ${fixture.awayScore}")
-            } else {
-                Text("Status: ${fixture.status}")
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(
+                    fixture.homeTeamName ?: "TBD",
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text("vs", style = MaterialTheme.typography.bodySmall)
+                Text(
+                    fixture.awayTeamName ?: "TBD",
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (fixture.homeScore != null && fixture.awayScore != null) {
+                Text(
+                    "Ergebnis · ${fixture.homeScore} : ${fixture.awayScore}",
+                    style = MaterialTheme.typography.titleSmall,
+                )
+            }
+            if (fixture.venue?.isNotBlank() == true || fixture.seasonYear != null) {
+                Text(
+                    listOfNotNull(
+                        fixture.venue?.takeIf(String::isNotBlank),
+                        fixture.seasonYear?.let { "Saison $it" },
+                        fixture.matchday?.let { "Spieltag $it" },
+                    ).joinToString(" · "),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
             if (
                 fixture.homeWinProbability != null &&
                 fixture.drawProbability != null &&
                 fixture.awayWinProbability != null
             ) {
-                Text(
-                    "Prognose: Heimsieg ${percent(fixture.homeWinProbability)} · " +
-                        "Unentschieden ${percent(fixture.drawProbability)} · " +
-                        "Auswärtssieg ${percent(fixture.awayWinProbability)}",
-                )
+                HorizontalDivider()
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    ProbabilitySummaryCell("1 · Heimsieg", fixture.homeWinProbability, Modifier.weight(1f))
+                    ProbabilitySummaryCell("X · Remis", fixture.drawProbability, Modifier.weight(1f))
+                    ProbabilitySummaryCell("2 · Auswärts", fixture.awayWinProbability, Modifier.weight(1f))
+                }
                 if (fixture.expectedHomeGoals != null && fixture.expectedAwayGoals != null) {
                     Text(
-                        "Erwartete Tore: ${fixture.expectedHomeGoals.format(2)} : " +
+                        "Erwartete Tore (Heim : Auswärts): ${fixture.expectedHomeGoals.format(2)} : " +
                             fixture.expectedAwayGoals.format(2),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             } else {
-                Text("Noch keine Prognose (zu wenige historische Daten).")
-            }
-            tip?.let {
                 Text(
-                    "Wahrscheinlichster Markt: ${it.market} · ${percent(it.probability)}",
-                    color = MaterialTheme.colorScheme.primary,
-                    style = MaterialTheme.typography.bodyMedium,
+                    "Noch keine Prognose verfügbar",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            valueTip?.let {
-                Text(
-                    "Quoten-Tipp: ${it.market} · Quote ${it.decimalOdds.format(2)} · " +
-                        "Modell-Value +${percent(it.expectedValue)} · ${it.bookmaker}",
-                    color = MaterialTheme.colorScheme.tertiary,
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-            } ?: if (odds.isNotEmpty()) {
-                Text("Kein Quoten-Tipp mit positiver Modell-Value (Quote mindestens 1,50).")
-            } else {
-                Text("Keine passenden Buchmacherquoten gespeichert.")
+            if (tip != null || valueTip != null) {
+                HorizontalDivider()
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    tip?.let {
+                        Text(
+                            "Modell-Tipp · ${it.market} · ${percent(it.probability)}",
+                            color = MaterialTheme.colorScheme.primary,
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+                    valueTip?.let {
+                        Text(
+                            "Quoten-Tipp · ${it.market} · Quote ${it.decimalOdds.format(2)} · " +
+                                "Value +${percent(it.expectedValue)}",
+                            color = MaterialTheme.colorScheme.tertiary,
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+                }
             }
             analysis?.let {
-                Text(it.confidenceLabel, style = MaterialTheme.typography.bodySmall)
-            }
+                Text(
+                    "${it.confidenceLabel} · Tippen für Details",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } ?: Text(
+                "Tippen für Spielanalyse",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
+    }
+}
+
+@Composable
+private fun ProbabilitySummaryCell(
+    label: String,
+    probability: Double,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier,
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        Text(
+            label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+            percent(probability),
+            style = MaterialTheme.typography.titleSmall,
+            textAlign = TextAlign.Center,
+        )
     }
 }
 
