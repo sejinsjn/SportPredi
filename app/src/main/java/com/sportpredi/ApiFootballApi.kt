@@ -232,6 +232,45 @@ internal fun apiFootballHeadToHeadQueryParameters(
     )
 }
 
+internal fun apiFootballTeamFixtureQueryParameters(
+    teamId: Int,
+    seasonYear: Int,
+    from: String? = null,
+    to: String? = null,
+): Map<String, String> {
+    require(teamId > 0)
+    require(seasonYear > 0)
+    require((from == null) == (to == null)) { "Date range requires both from and to." }
+    return linkedMapOf(
+        "team" to teamId.toString(),
+        "season" to seasonYear.toString(),
+    ).apply {
+        if (from != null && to != null) {
+            put("from", from)
+            put("to", to)
+        }
+    }
+}
+
+internal fun apiFootballCurrentTeamFixtureQueryParameters(
+    teamId: Int,
+    seasonYear: Int,
+    today: LocalDate,
+    historyDays: Long,
+    upcomingDays: Long,
+    fullSeasonBackfill: Boolean,
+): Map<String, String> =
+    if (fullSeasonBackfill) {
+        apiFootballTeamFixtureQueryParameters(teamId, seasonYear)
+    } else {
+        apiFootballTeamFixtureQueryParameters(
+            teamId = teamId,
+            seasonYear = seasonYear,
+            from = today.minusDays(historyDays).toString(),
+            to = today.plusDays(upcomingDays).toString(),
+        )
+    }
+
 internal fun apiFootballCurrentFixtureQueryParameters(
     leagueId: Int,
     seasonYear: Int,
@@ -260,7 +299,6 @@ interface ApiFootballApi {
     @GET("leagues")
     suspend fun leagues(
         @Header("x-apisports-key") apiKey: String,
-        @Query("current") current: String = "true",
     ): Response<ApiFootballResponse<ApiFootballLeagueDto>>
 
     @GET("fixtures")

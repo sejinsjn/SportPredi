@@ -7,6 +7,51 @@ import org.junit.Test
 
 class ApiFootballCatalogSelectionTest {
     @Test
+    fun fullCatalogKeepsAllSupportedCompetitionsAndDeduplicatesStableIds() {
+        val catalog = listOf(
+            league(39, "Premier League", "League", listOf(2025, 2026)),
+            league(450, "National Cup", "Cup", listOf(2026)),
+            league(451, "Friendly matches", "Friendly", listOf(2026)),
+            league(39, "Duplicate", "League", listOf(2026)),
+            league(0, "Invalid", "League", listOf(2026)),
+        )
+
+        val normalized = normalizeApiFootballCatalog(catalog)
+
+        assertEquals(setOf(39, 450), normalized.map { it.league.id }.toSet())
+    }
+
+    @Test
+    fun defaultSelectionKeepsOnlyAvailableLegacyTargets() {
+        val catalog = listOf(
+            league(39, "Premier League", "League", listOf(2026)),
+            league(450, "National Cup", "Cup", listOf(2026)),
+        )
+
+        assertEquals(setOf(39), defaultApiFootballCompetitionSelection(catalog))
+    }
+
+    @Test
+    fun fixtureSelectionAppliesBothCompetitionAndOptionalTeamFilters() {
+        val competitions = setOf(39, 140)
+        val teams = setOf(33, 44)
+
+        assertTrue(isApiFootballFixtureSelected(39, 33, 40, competitions, teams))
+        assertFalse(isApiFootballFixtureSelected(39, 40, 45, competitions, teams))
+        assertFalse(isApiFootballFixtureSelected(78, 33, 40, competitions, teams))
+        assertTrue(isApiFootballFixtureSelected(39, null, 40, competitions, null))
+        assertFalse(isApiFootballFixtureSelected(39, null, null, competitions, emptySet()))
+    }
+
+    @Test
+    fun teamSelectionUsesAllTeamsSentinelAndStableIdSerialization() {
+        assertEquals(null, parseApiFootballTeamSelection(null))
+        assertEquals(null, parseApiFootballTeamSelection(API_FOOTBALL_ALL_TEAMS_SENTINEL))
+        assertEquals(setOf(33, 44), parseApiFootballTeamSelection("44,33,44"))
+        assertEquals("33,44", serializeApiFootballIds(setOf(44, 33)))
+    }
+
+    @Test
     fun catalogUsesOnlyExactTargetIdsAndReportsTargetsNotReturnedByProvider() {
         val catalog = listOf(
             league(39, "Premier League", "League", listOf(2025, 2026)),

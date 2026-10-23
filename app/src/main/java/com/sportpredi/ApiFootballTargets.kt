@@ -31,9 +31,58 @@ internal const val API_FOOTBALL_TARGET_CATALOG_CHECKED_KEY = "apiFootballTargetC
 internal const val API_FOOTBALL_TARGET_CATALOG_AVAILABLE_KEY = "apiFootballTargetCatalogAvailableIds"
 internal const val API_FOOTBALL_TARGET_CATALOG_MISSING_KEY = "apiFootballTargetCatalogMissingIds"
 internal const val API_FOOTBALL_TARGET_CURRENT_SEASONS_KEY = "apiFootballTargetCurrentSeasonIds"
+internal const val API_FOOTBALL_CATALOG_JSON_KEY = "apiFootballFullCatalogJson"
+internal const val API_FOOTBALL_SELECTED_COMPETITIONS_KEY = "apiFootballSelectedCompetitionIds"
+internal const val API_FOOTBALL_SELECTED_TEAMS_KEY = "apiFootballSelectedTeamIds"
+internal const val API_FOOTBALL_ALL_TEAMS_SENTINEL = "*"
+internal const val API_FOOTBALL_SELECTION_SAVED_KEY = "apiFootballSelectionSaved"
 
 private val apiFootballTargetCompetitionIds =
     API_FOOTBALL_TARGET_COMPETITIONS.map { it.providerId }.toSet()
+
+internal fun normalizeApiFootballCatalog(
+    catalog: List<ApiFootballLeagueDto>,
+): List<ApiFootballLeagueDto> =
+    catalog.asSequence()
+        .filter { it.league.id > 0 && it.league.name.isNotBlank() }
+        .filter { isSupportedApiFootballCompetitionType(it.league.type) }
+        .distinctBy { it.league.id }
+        .sortedWith(
+            compareBy<ApiFootballLeagueDto> { it.country?.name.orEmpty().lowercase() }
+                .thenBy { it.league.name.lowercase() }
+                .thenBy { it.league.id },
+        )
+        .toList()
+
+internal fun defaultApiFootballCompetitionSelection(
+    catalog: List<ApiFootballLeagueDto>,
+): Set<Int> =
+    API_FOOTBALL_TARGET_COMPETITIONS.map { it.providerId }
+        .filter { id -> catalog.any { it.league.id == id } }
+        .toSet()
+
+internal fun isApiFootballFixtureSelected(
+    competitionId: Int,
+    homeTeamId: Int?,
+    awayTeamId: Int?,
+    selectedCompetitionIds: Set<Int>,
+    selectedTeamIds: Set<Int>?,
+): Boolean =
+    competitionId in selectedCompetitionIds &&
+        (
+            selectedTeamIds == null ||
+                homeTeamId?.let(selectedTeamIds::contains) == true ||
+                awayTeamId?.let(selectedTeamIds::contains) == true
+            )
+
+internal fun parseApiFootballTeamSelection(value: String?): Set<Int>? =
+    when {
+        value == null || value == API_FOOTBALL_ALL_TEAMS_SENTINEL -> null
+        else -> value.split(',').mapNotNull { it.trim().toIntOrNull() }.toSet()
+    }
+
+internal fun serializeApiFootballIds(ids: Set<Int>): String =
+    ids.filter { it > 0 }.sorted().joinToString(",")
 
 internal fun isApiFootballTargetCompetition(providerId: Int): Boolean =
     providerId in apiFootballTargetCompetitionIds

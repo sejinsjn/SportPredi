@@ -27,6 +27,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -91,6 +92,11 @@ private data class TargetCatalogUiData(
     val availableIds: String?,
     val missingIds: String?,
     val currentSeasonIds: String?,
+    val catalogJson: String?,
+    val selectedCompetitionIds: String?,
+    val selectedTeamIds: String?,
+    val teams: List<TeamEntity>,
+    val teamCompetitionIds: Map<Int, Set<Int>>,
 )
 
 @Composable
@@ -566,6 +572,14 @@ private fun FixturesScreen(
     var targetCatalogAvailableIds by remember { mutableStateOf(emptySet<Int>()) }
     var targetCatalogMissingIds by remember { mutableStateOf(emptySet<Int>()) }
     var targetCatalogCurrentSeasonIds by remember { mutableStateOf(emptySet<Int>()) }
+    var catalogItems by remember { mutableStateOf(emptyList<ApiFootballLeagueDto>()) }
+    var selectedCompetitionIds by remember { mutableStateOf(emptySet<Int>()) }
+    var selectedTeamIds by remember { mutableStateOf<Set<Int>?>(null) }
+    var teams by remember { mutableStateOf(emptyList<TeamEntity>()) }
+    var teamCompetitionIds by remember { mutableStateOf(emptyMap<Int, Set<Int>>()) }
+    var showDataSelection by remember { mutableStateOf(false) }
+    var selectionError by remember { mutableStateOf<String?>(null) }
+    var selectionSaving by remember { mutableStateOf(false) }
     var selectedFixture by remember { mutableStateOf<FixtureDisplay?>(null) }
     var showFixturesInfo by remember { mutableStateOf(false) }
     var restoreListScrollPosition by remember { mutableStateOf(false) }
@@ -582,6 +596,21 @@ private fun FixturesScreen(
                 availableIds = dao.syncMetadata(API_FOOTBALL_TARGET_CATALOG_AVAILABLE_KEY)?.value,
                 missingIds = dao.syncMetadata(API_FOOTBALL_TARGET_CATALOG_MISSING_KEY)?.value,
                 currentSeasonIds = dao.syncMetadata(API_FOOTBALL_TARGET_CURRENT_SEASONS_KEY)?.value,
+                catalogJson = dao.syncMetadata(API_FOOTBALL_CATALOG_JSON_KEY)?.value,
+                selectedCompetitionIds = dao.syncMetadata(API_FOOTBALL_SELECTED_COMPETITIONS_KEY)?.value,
+                selectedTeamIds = dao.syncMetadata(API_FOOTBALL_SELECTED_TEAMS_KEY)?.value,
+                teams = dao.allTeams(),
+                teamCompetitionIds = dao.allFixtures()
+                    .flatMap { fixture ->
+                        val competitionId = fixture.competitionCode.substringAfterLast(':').toIntOrNull()
+                            ?: return@flatMap emptyList()
+                        listOfNotNull(
+                            fixture.homeTeamId?.let { it to competitionId },
+                            fixture.awayTeamId?.let { it to competitionId },
+                        )
+                    }
+                    .groupBy({ it.first }, { it.second })
+                    .mapValues { (_, ids) -> ids.toSet() },
             )
         }
         coverageRows = result.coverageRows
@@ -590,10 +619,30 @@ private fun FixturesScreen(
         targetCatalogAvailableIds = parseApiFootballTargetIds(result.availableIds)
         targetCatalogMissingIds = parseApiFootballTargetIds(result.missingIds)
         targetCatalogCurrentSeasonIds = parseApiFootballTargetIds(result.currentSeasonIds)
+        catalogItems = result.catalogJson?.let { json ->
+            runCatching {
+                Gson().fromJson(json, Array<ApiFootballLeagueDto>::class.java)?.toList().orEmpty()
+            }.getOrDefault(emptyList())
+        }.orEmpty()
+        selectedCompetitionIds = result.selectedCompetitionIds?.let(::parseApiFootballTargetIds)
+            ?: defaultApiFootballCompetitionSelection(catalogItems)
+        selectedTeamIds = parseApiFootballTeamSelection(result.selectedTeamIds)
+        teams = result.teams
+        teamCompetitionIds = result.teamCompetitionIds
     }
 
+    val selectedTeams = selectedTeamIds
     val visibleFixtures = fixtures.filter { fixture ->
-        (fixture.country ?: "").contains(countryFilter, ignoreCase = true) &&
+        fixture.competitionCode.substringAfterLast(':').toIntOrNull()?.let { competitionId ->
+            isApiFootballFixtureSelected(
+                competitionId = competitionId,
+                homeTeamId = fixture.homeTeamId,
+                awayTeamId = fixture.awayTeamId,
+                selectedCompetitionIds = selectedCompetitionIds,
+                selectedTeamIds = selectedTeams,
+            )
+        } == true &&
+            (fixture.country ?: "").contains(countryFilter, ignoreCase = true) &&
             (fixture.competitionName ?: "").contains(leagueFilter, ignoreCase = true) &&
             (seasonFilter.isBlank() || fixture.seasonYear?.toString()?.contains(seasonFilter) == true) &&
             (
@@ -756,6 +805,91 @@ private fun FixturesScreen(
                 }
             }
         }
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    Text("Meine Datenauswahl", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        "${selectedCompetitionIds.size} Wettbewerbe · " +
+                            (selectedTeamIds?.size?.let { "$it Mannschaften" } ?: "alle Mannschaften"),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                OutlinedButton(
+                    onClick = { showDataSelection = true },
+                    enabled = catalogItems.isNotEmpty() && !loading && !selectionSaving,
+                ) {
+                    Text("Auswählen")
+                }
+            }
+            if (catalogItems.isEmpty()) {
+                Text(
+                    "Der vollständige API-Football-Katalog wird beim nächsten Aktualisieren geladen.",
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            selectionError?.let {
+                Text(
+                    it,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+        }
+        if (showDataSelection) {
+            ApiFootballSelectionDialog(
+                catalog = catalogItems,
+                teams = teams,
+                teamCompetitionIds = teamCompetitionIds,
+                selectedCompetitionIds = selectedCompetitionIds,
+                selectedTeamIds = selectedTeamIds,
+                saving = selectionSaving,
+                onDismiss = { if (!selectionSaving) showDataSelection = false },
+                onSave = { competitionIds, teamIds ->
+                    fixtureScreenScope.launch {
+                        selectionSaving = true
+                        selectionError = null
+                        try {
+                            withContext(Dispatchers.IO) {
+                                dao.upsertSyncMetadata(
+                                    SyncMetadataEntity(
+                                        API_FOOTBALL_SELECTED_COMPETITIONS_KEY,
+                                        serializeApiFootballIds(competitionIds),
+                                    ),
+                                )
+                                dao.upsertSyncMetadata(
+                                    SyncMetadataEntity(
+                                        API_FOOTBALL_SELECTED_TEAMS_KEY,
+                                        teamIds?.let(::serializeApiFootballIds)
+                                            ?: API_FOOTBALL_ALL_TEAMS_SENTINEL,
+                                    ),
+                                )
+                            }
+                            selectedCompetitionIds = competitionIds
+                            selectedTeamIds = teamIds
+                            showDataSelection = false
+                            onSynchronize()
+                        } catch (exception: Exception) {
+                            if (exception is CancellationException) throw exception
+                            selectionError = "Auswahl konnte nicht gespeichert werden: " +
+                                (exception.message ?: "Unbekannter Fehler")
+                        } finally {
+                            selectionSaving = false
+                        }
+                    }
+                },
+            )
+        }
         if (loading) CircularProgressIndicator()
         syncError?.let { Text("Synchronisierungsfehler: $it", color = MaterialTheme.colorScheme.error) }
         if (visibleFixtures.isEmpty() && !loading) {
@@ -801,8 +935,9 @@ private fun FixturesScreen(
                             "${coverageRows.sumOf { it.fixtureCount }} Spiele lokal gespeichert",
                     )
                     Text(
-                        "Es werden nur die oben gelisteten exakten API-Football-IDs verwendet. " +
-                            "Nicht gelieferte Wettbewerbe werden nicht durch ähnlich benannte Ligen ersetzt.",
+                        "Der API-Football-Katalog wird dynamisch geladen. Nur deine gespeicherten Wettbewerbe " +
+                            "und Mannschaften werden synchronisiert; nicht unterstützte Wettbewerbe werden " +
+                            "nicht durch ähnlich benannte Ligen ersetzt.",
                         style = MaterialTheme.typography.bodySmall,
                     )
                     coverageRows.groupBy { it.competitionCode }.forEach { (code, seasons) ->
@@ -869,8 +1004,9 @@ private fun FixturesScreen(
                             "Holdout-Backtest berichtet.",
                     )
                     Text(
-                        "Standardansicht: alle aktuell verfügbaren Wettbewerbe; Saison " +
-                            "$currentSeasonLabel bis $currentSeasonEnd. Die Abdeckung hängt von den Datenquellen ab.",
+                        "Die Standardauswahl umfasst die bisherigen Hauptligen, Pokale und UEFA-Wettbewerbe. " +
+                            "Weitere Wettbewerbe kannst du oben im API-Football-Katalog auswählen. Saison " +
+                            "$currentSeasonLabel bis $currentSeasonEnd.",
                     )
                 }
             },
@@ -881,6 +1017,195 @@ private fun FixturesScreen(
             },
         )
     }
+}
+
+@Composable
+private fun ApiFootballSelectionDialog(
+    catalog: List<ApiFootballLeagueDto>,
+    teams: List<TeamEntity>,
+    teamCompetitionIds: Map<Int, Set<Int>>,
+    selectedCompetitionIds: Set<Int>,
+    selectedTeamIds: Set<Int>?,
+    saving: Boolean,
+    onDismiss: () -> Unit,
+    onSave: (Set<Int>, Set<Int>?) -> Unit,
+) {
+    var competitionIds by remember(selectedCompetitionIds) {
+        mutableStateOf(selectedCompetitionIds)
+    }
+    var teamIds by remember(selectedTeamIds) { mutableStateOf(selectedTeamIds) }
+    var countrySearch by remember { mutableStateOf("") }
+    var competitionSearch by remember { mutableStateOf("") }
+    var teamSearch by remember { mutableStateOf("") }
+
+    val competitionsByCountry = catalog.groupBy { it.country?.name?.takeIf(String::isNotBlank) ?: "Land unbekannt" }
+    val countries = competitionsByCountry.keys.sorted()
+        .filter { it.contains(countrySearch, ignoreCase = true) }
+    val competitionMatches = catalog.filter { competition ->
+        val country = competition.country?.name.orEmpty()
+        (countrySearch.isBlank() || country.contains(countrySearch, ignoreCase = true)) &&
+            (
+                competitionSearch.isBlank() ||
+                    competition.league.name.contains(competitionSearch, ignoreCase = true) ||
+                    country.contains(competitionSearch, ignoreCase = true)
+                )
+    }
+    val selectableTeams = teams.filter { team ->
+        teamCompetitionIds[team.providerTeamId].orEmpty().any(competitionIds::contains)
+    }.filter { it.name.contains(teamSearch, ignoreCase = true) }
+    val competitionsWithoutKnownTeams = competitionIds -
+        teamCompetitionIds.values.flatten().toSet()
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Länder, Wettbewerbe und Teams") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 560.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    "Nur ausgewählte Wettbewerbe und Mannschaften werden synchronisiert und angezeigt. " +
+                        "Der Katalog enthält alle von API-Football gemeldeten Ligen und Pokale.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                OutlinedTextField(
+                    value = countrySearch,
+                    onValueChange = { countrySearch = it },
+                    label = { Text("Land suchen") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                )
+                Text("Länder", style = MaterialTheme.typography.titleSmall)
+                if (countries.isEmpty()) {
+                    Text("Kein passendes Land.")
+                } else {
+                    countries.take(30).forEach { country ->
+                        val ids = competitionsByCountry[country].orEmpty()
+                            .map { it.league.id }
+                            .toSet()
+                        val allSelected = ids.isNotEmpty() && ids.all(competitionIds::contains)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(
+                                checked = allSelected,
+                                onCheckedChange = { selected ->
+                                    competitionIds = if (selected) competitionIds + ids
+                                    else competitionIds - ids
+                                },
+                            )
+                            Text("$country · ${ids.size} Wettbewerbe")
+                        }
+                    }
+                    if (countries.size > 30) {
+                        Text("Weitere Länder über die Suche eingrenzen.", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+                OutlinedTextField(
+                    value = competitionSearch,
+                    onValueChange = { competitionSearch = it },
+                    label = { Text("Liga oder Wettbewerb suchen") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = { competitionIds = catalog.map { it.league.id }.toSet() }) {
+                        Text("Alle Wettbewerbe")
+                    }
+                    TextButton(onClick = { competitionIds = emptySet() }) {
+                        Text("Keine")
+                    }
+                }
+                Text(
+                    "Wettbewerbe · ${competitionIds.size} ausgewählt",
+                    style = MaterialTheme.typography.titleSmall,
+                )
+                competitionMatches.take(60).forEach { competition ->
+                    val id = competition.league.id
+                    val typeLabel = when (competition.league.type?.lowercase()) {
+                        "league" -> "Liga"
+                        "cup" -> "Pokal"
+                        else -> "Wettbewerb"
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(
+                            checked = id in competitionIds,
+                            onCheckedChange = { selected ->
+                                competitionIds = if (selected) competitionIds + id
+                                else competitionIds - id
+                            },
+                        )
+                        Text(
+                            "${competition.country?.name ?: "Land unbekannt"} · " +
+                                "${competition.league.name} · $typeLabel",
+                        )
+                    }
+                }
+                if (competitionMatches.size > 60) {
+                    Text("Weitere Wettbewerbe über die Suche eingrenzen.", style = MaterialTheme.typography.bodySmall)
+                }
+                HorizontalDivider()
+                Text("Mannschaften", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    if (teamIds == null) {
+                        "Alle Mannschaften der ausgewählten Wettbewerbe sind aktiv. " +
+                            "Wähle ein Team aus, um die Synchronisierung darauf einzuschränken."
+                    } else {
+                        "${teamIds?.size ?: 0} Mannschaften ausgewählt."
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                TextButton(onClick = { teamIds = null }) { Text("Alle Mannschaften") }
+                if (teamIds != null && competitionsWithoutKnownTeams.isNotEmpty()) {
+                    Text(
+                        "Für ${competitionsWithoutKnownTeams.size} ausgewählte Wettbewerbe sind noch keine " +
+                            "Teams lokal importiert. Aktiviere zunächst „Alle Mannschaften“ und importiere " +
+                            "die Spielpläne, bevor du dort Teams einzeln auswählst.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                OutlinedTextField(
+                    value = teamSearch,
+                    onValueChange = { teamSearch = it },
+                    label = { Text("Mannschaft suchen") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                )
+                if (selectableTeams.isEmpty()) {
+                    Text("Für diese Wettbewerbe sind noch keine Teams lokal bekannt.")
+                } else {
+                    selectableTeams.take(60).forEach { team ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(
+                                checked = teamIds?.contains(team.providerTeamId) == true,
+                                onCheckedChange = { selected ->
+                                    val current = teamIds ?: emptySet()
+                                    teamIds = if (selected) current + team.providerTeamId
+                                    else current - team.providerTeamId
+                                },
+                            )
+                            Text(team.name)
+                        }
+                    }
+                    if (selectableTeams.size > 60) {
+                        Text("Weitere Mannschaften über die Suche eingrenzen.", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onSave(competitionIds, teamIds) },
+                enabled = !saving,
+            ) {
+                Text(if (saving) "Speichern …" else "Speichern und aktualisieren")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !saving) { Text("Abbrechen") }
+        },
+    )
 }
 
 @Composable
@@ -1161,12 +1486,22 @@ private fun FixtureDetailsScreen(
                             .orEmpty()
                     }.getOrDefault(emptyList())
                 }.orEmpty()
-                val localHeadToHead = dao.headToHead(
-                    homeId,
-                    awayId,
-                    match.matchDate,
-                    HEAD_TO_HEAD_LOOKBACK,
-                )
+                val selectedCompetitionIds = dao.syncMetadata(API_FOOTBALL_SELECTED_COMPETITIONS_KEY)
+                    ?.value
+                    ?.let(::parseApiFootballTargetIds)
+                    ?: API_FOOTBALL_TARGET_COMPETITIONS.map { it.providerId }.toSet()
+                val competitionCodes = selectedCompetitionIds.map { "api-football:$it" }
+                val localHeadToHead = if (competitionCodes.isEmpty()) {
+                    emptyList()
+                } else {
+                    dao.headToHead(
+                        homeId,
+                        awayId,
+                        match.matchDate,
+                        HEAD_TO_HEAD_LOOKBACK,
+                        competitionCodes,
+                    )
+                }
                 var headToHeadError: String? = null
                 val headToHead = try {
                     syncRepository.synchronizeHeadToHead(

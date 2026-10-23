@@ -179,6 +179,7 @@ data class BacktestPredictionEntity(
 
 data class FixtureDisplay(
     val providerFixtureId: Long,
+    val competitionCode: String,
     val kickoffAt: String?,
     val matchDate: String,
     val status: String,
@@ -189,6 +190,8 @@ data class FixtureDisplay(
     val competitionName: String?,
     val country: String?,
     val seasonYear: Int?,
+    val homeTeamId: Int?,
+    val awayTeamId: Int?,
     val homeTeamName: String?,
     val awayTeamName: String?,
     val homeScore: Int?,
@@ -293,6 +296,16 @@ interface SportPrediDao {
     @Query("SELECT * FROM teams ORDER BY name")
     suspend fun allTeams(): List<TeamEntity>
 
+    @Query(
+        """
+        SELECT DISTINCT t.* FROM teams t
+        JOIN fixtures f ON f.homeTeamId = t.providerTeamId OR f.awayTeamId = t.providerTeamId
+        WHERE f.competitionCode IN (:competitionCodes)
+        ORDER BY t.name
+        """
+    )
+    suspend fun teamsInCompetitions(competitionCodes: List<String>): List<TeamEntity>
+
     @Query("SELECT * FROM fixtures WHERE seasonId = :seasonId")
     suspend fun fixturesForSeason(seasonId: String): List<FixtureEntity>
 
@@ -310,6 +323,7 @@ interface SportPrediDao {
         SELECT * FROM fixtures
         WHERE matchDate < :beforeDate
           AND fullTimeResult = 1 AND homeScore IS NOT NULL AND awayScore IS NOT NULL
+          AND competitionCode IN (:competitionCodes)
           AND (
             (homeTeamId = :homeTeamId AND awayTeamId = :awayTeamId)
             OR (homeTeamId = :awayTeamId AND awayTeamId = :homeTeamId)
@@ -323,6 +337,7 @@ interface SportPrediDao {
         awayTeamId: Int,
         beforeDate: String,
         limit: Int,
+        competitionCodes: List<String>,
     ): List<FixtureEntity>
 
     @Query("SELECT * FROM fixtures ORDER BY matchDate, kickoffAt")
@@ -366,7 +381,9 @@ interface SportPrediDao {
 
     @Query(
         """
-        SELECT f.providerFixtureId, f.kickoffAt, f.matchDate, f.status,
+        SELECT f.providerFixtureId, f.competitionCode,
+               f.homeTeamId, f.awayTeamId,
+               f.kickoffAt, f.matchDate, f.status,
                f.postponedOrCancelled, f.rescheduled, f.venue, f.matchday,
                c.name AS competitionName, c.country,
                s.seasonYear,

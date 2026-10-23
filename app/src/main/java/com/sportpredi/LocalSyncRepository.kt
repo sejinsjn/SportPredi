@@ -16,6 +16,8 @@ import retrofit2.Response
 private val FINISHED_STATUSES = setOf("FT", "AET", "PEN")
 private val CANCELLED_STATUSES = setOf("CANC", "ABD", "AWD", "WO")
 private val POSTPONED_STATUSES = setOf("PST", "SUSP", "INT")
+private const val TEAM_SEASON_LAST_SYNC_PREFIX = "apiFootballTeamSeasonLastSync:"
+private const val TEAM_SEASON_COMPLETE_PREFIX = "apiFootballTeamSeasonComplete:"
 
 data class SyncProgress(val completedSeasons: Int, val totalSeasons: Int, val message: String)
 
@@ -335,6 +337,42 @@ internal data class ApiFootballHistoricalSeasonRequest(
         get() = "api-football:${league.league.id}:$seasonYear"
 }
 
+internal data class ApiFootballTeamSeasonRequest(
+    val teamId: Int,
+    val seasonYear: Int,
+) {
+    val key: String
+        get() = "$teamId:$seasonYear"
+}
+
+internal fun selectApiFootballTeamSeasonRequests(
+    teamIds: Set<Int>,
+    seasonYears: Set<Int>,
+    requestLimit: Int,
+    lastSyncByTeamSeason: Map<String, String> = emptyMap(),
+    completedTeamSeasons: Set<String> = emptySet(),
+    includeCompleted: Boolean = false,
+): List<ApiFootballTeamSeasonRequest> {
+    if (requestLimit <= 0) return emptyList()
+    return teamIds.asSequence()
+        .filter { it > 0 }
+        .flatMap { teamId ->
+            seasonYears.asSequence()
+                .filter { it > 0 }
+                .map { year -> ApiFootballTeamSeasonRequest(teamId, year) }
+        }
+        .filter { includeCompleted || it.key !in completedTeamSeasons }
+        .sortedWith(
+            compareBy<ApiFootballTeamSeasonRequest> {
+                lastSyncByTeamSeason[it.key]
+                    ?.let { timestamp -> runCatching { Instant.parse(timestamp).toEpochMilli() }.getOrNull() }
+                    ?: Long.MIN_VALUE
+            }.thenBy { it.teamId }.thenByDescending { it.seasonYear },
+        )
+        .take(requestLimit)
+        .toList()
+}
+
 internal fun isSupportedApiFootballCompetitionType(type: String?): Boolean =
     type.equals("League", ignoreCase = true) || type.equals("Cup", ignoreCase = true)
 
@@ -344,13 +382,15 @@ internal fun selectApiFootballHistoricalSeasons(
     historicalYears: Int,
     seasonsPerLeague: Int,
     requestLimit: Int,
+    selectedCompetitionIds: Set<Int> =
+        API_FOOTBALL_TARGET_COMPETITIONS.map { it.providerId }.toSet(),
     syncStates: Map<String, ApiFootballSeasonSyncState> = emptyMap(),
     includeCurrentSeason: Boolean = true,
 ): List<ApiFootballHistoricalSeasonRequest> {
     if (requestLimit <= 0) return emptyList()
     return leagues.asSequence()
         .filter { it.league.id > 0 && it.league.name.isNotBlank() }
-        .filter { isApiFootballTargetCompetition(it.league.id) }
+        .filter { it.league.id in selectedCompetitionIds }
         .filter { isSupportedApiFootballCompetitionType(it.league.type) }
         .distinctBy { it.league.id }
         .flatMap { league ->
@@ -384,12 +424,14 @@ internal fun selectApiFootballCurrentSeasons(
     leagues: List<ApiFootballLeagueDto>,
     currentYear: Int,
     requestLimit: Int,
+    selectedCompetitionIds: Set<Int> =
+        API_FOOTBALL_TARGET_COMPETITIONS.map { it.providerId }.toSet(),
     syncStates: Map<String, ApiFootballSeasonSyncState> = emptyMap(),
 ): List<ApiFootballHistoricalSeasonRequest> {
     if (requestLimit <= 0) return emptyList()
     return leagues.asSequence()
         .filter { it.league.id > 0 && it.league.name.isNotBlank() }
-        .filter { isApiFootballTargetCompetition(it.league.id) }
+        .filter { it.league.id in selectedCompetitionIds }
         .filter { isSupportedApiFootballCompetitionType(it.league.type) }
         .distinctBy { it.league.id }
         .mapNotNull { league ->
@@ -423,17 +465,25 @@ class LocalSyncRepository(
         awayTeamId: Int,
         beforeDate: String,
     ): List<FixtureEntity> = syncMutex.withLock {
+        val selectedCompetitionIds = dao.syncMetadata(API_FOOTBALL_SELECTED_COMPETITIONS_KEY)
+            ?.value
+            ?.let(::parseApiFootballTargetIds)
+            ?: API_FOOTBALL_TARGET_COMPETITIONS.map { it.providerId }.toSet()
+        if (selectedCompetitionIds.isEmpty()) return@withLock emptyList()
+        val competitionCodes = selectedCompetitionIds.map { "api-football:$it" }
         val existing = dao.headToHead(
             homeTeamId = homeTeamId,
             awayTeamId = awayTeamId,
             beforeDate = beforeDate,
             limit = HEAD_TO_HEAD_LOOKBACK,
+            competitionCodes = competitionCodes,
         )
         if (existing.size >= HEAD_TO_HEAD_LOOKBACK) return@withLock existing
 
         val now = Instant.now()
         val pairKey = listOf(homeTeamId, awayTeamId).sorted().joinToString("-")
-        val cacheKey = "$HEAD_TO_HEAD_CACHE_PREFIX$pairKey"
+        val selectionKey = selectedCompetitionIds.sorted().joinToString("-")
+        val cacheKey = "$HEAD_TO_HEAD_CACHE_PREFIX$pairKey:$selectionKey"
         val cachedAt = dao.syncMetadata(cacheKey)?.value
         if (
             cachedAt != null &&
@@ -513,7 +563,7 @@ class LocalSyncRepository(
 
         val fetchedAt = Instant.now().toString()
         val matchingFixtures = normalizeApiFootballHeadToHead(
-            items = body.response.orEmpty(),
+            items = body.response.orEmpty().filter { it.league.id in selectedCompetitionIds },
             homeTeamId = homeTeamId,
             awayTeamId = awayTeamId,
             beforeDate = beforeDate,
@@ -521,6 +571,7 @@ class LocalSyncRepository(
         )
         val matchingFixtureIds = matchingFixtures.map { it.providerFixtureId }.toSet()
         val matchingDtos = body.response.orEmpty()
+            .filter { it.league.id in selectedCompetitionIds }
             .filter { dto -> dto.fixture.id.toLong() in matchingFixtureIds }
         val competitions = matchingDtos
             .map { dto ->
@@ -551,6 +602,7 @@ class LocalSyncRepository(
             awayTeamId = awayTeamId,
             beforeDate = beforeDate,
             limit = HEAD_TO_HEAD_LOOKBACK,
+            competitionCodes = competitionCodes,
         )
     }
 
@@ -686,22 +738,66 @@ class LocalSyncRepository(
             )
 
             onProgress(SyncProgress(0, 2, "API-Football-Wettbewerbe werden geladen …"))
-            countRequest()
-            val catalog = validatedBody(api.leagues(apiKey))
-            val targetSelection = selectApiFootballTargetCompetitions(catalog.response.orEmpty())
-            val leagues = targetSelection.available
+            val cachedCatalogJson = dao.syncMetadata(API_FOOTBALL_CATALOG_JSON_KEY)?.value
+            val cachedCatalogAt = dao.syncMetadata(API_FOOTBALL_TARGET_CATALOG_CHECKED_KEY)?.value
+            val catalog = if (
+                cachedCatalogJson != null &&
+                cachedCatalogAt != null &&
+                apiFootballStandingsCacheIsFresh(
+                    cachedCatalogAt,
+                    Instant.now(),
+                    Duration.ofHours(24),
+                )
+            ) {
+                runCatching {
+                    Gson().fromJson(cachedCatalogJson, Array<ApiFootballLeagueDto>::class.java)
+                        ?.toList()
+                        .orEmpty()
+                }.getOrElse {
+                    throw ApiFootballProviderException("Der lokale API-Football-Wettbewerbskatalog ist beschädigt.")
+                }
+            } else {
+                countRequest()
+                val response = validatedBody(api.leagues(apiKey))
+                val available = normalizeApiFootballCatalog(response.response.orEmpty())
+                dao.upsertSyncMetadata(
+                    SyncMetadataEntity(API_FOOTBALL_CATALOG_JSON_KEY, Gson().toJson(available)),
+                )
+                dao.upsertSyncMetadata(
+                    SyncMetadataEntity(API_FOOTBALL_TARGET_CATALOG_CHECKED_KEY, timestamp),
+                )
+                available
+            }
+            val availableLeagues = normalizeApiFootballCatalog(catalog)
+            val targetSelection = selectApiFootballTargetCompetitions(availableLeagues)
             missingTargetCompetitions = targetSelection.missing.map { "${it.name} (${it.providerId})" }
+            val storedSelection = dao.syncMetadata(API_FOOTBALL_SELECTED_COMPETITIONS_KEY)?.value
+            val selectedCompetitionIds = storedSelection?.let(::parseApiFootballTargetIds)
+                ?: defaultApiFootballCompetitionSelection(availableLeagues)
+            if (storedSelection == null) {
+                dao.upsertSyncMetadata(
+                    SyncMetadataEntity(
+                        API_FOOTBALL_SELECTED_COMPETITIONS_KEY,
+                        serializeApiFootballIds(selectedCompetitionIds),
+                    ),
+                )
+            }
+            val storedTeamSelection = dao.syncMetadata(API_FOOTBALL_SELECTED_TEAMS_KEY)?.value
+            if (storedTeamSelection == null) {
+                dao.upsertSyncMetadata(
+                    SyncMetadataEntity(
+                        API_FOOTBALL_SELECTED_TEAMS_KEY,
+                        API_FOOTBALL_ALL_TEAMS_SENTINEL,
+                    ),
+                )
+            }
+            val selectedTeamIds = parseApiFootballTeamSelection(storedTeamSelection)
+            val leagues = availableLeagues.filter { it.league.id in selectedCompetitionIds }
             competitionsChecked = leagues.size
             dao.upsertSyncMetadata(
                 SyncMetadataEntity(
-                    API_FOOTBALL_TARGET_CATALOG_CHECKED_KEY,
-                    timestamp,
-                ),
-            )
-            dao.upsertSyncMetadata(
-                SyncMetadataEntity(
                     API_FOOTBALL_TARGET_CATALOG_AVAILABLE_KEY,
-                    leagues.map { it.league.id }.sorted().joinToString(","),
+                    availableLeagues.map { it.league.id }.sorted().joinToString(","),
                 ),
             )
             dao.upsertSyncMetadata(
@@ -715,25 +811,32 @@ class LocalSyncRepository(
             val previousSeasonStates = dao.allSeasons().associate {
                 it.id to ApiFootballSeasonSyncState(it.lastSuccessfulFetch, it.lastProviderCheck)
             }
+            val catalogCurrentSeasons = selectApiFootballCurrentSeasons(
+                leagues = leagues,
+                currentYear = today.year,
+                requestLimit = leagues.size,
+                selectedCompetitionIds = selectedCompetitionIds,
+            )
             val availableAfterCatalog = minOf(
                 limits.maxRequestsPerSync - requests,
                 providerDailyRemaining ?: 0,
                 providerMinuteRemaining ?: 0,
             )
-            val currentSeasons = selectApiFootballCurrentSeasons(
-                leagues = leagues,
-                currentYear = today.year,
-                requestLimit = minOf(
-                    limits.maxUpcomingSeasonRequestsPerSync,
-                    (availableAfterCatalog + 1) / 2,
-                ),
-                syncStates = previousSeasonStates,
-            )
-            val catalogCurrentSeasonIds = selectApiFootballCurrentSeasons(
-                leagues = leagues,
-                currentYear = today.year,
-                requestLimit = API_FOOTBALL_TARGET_COMPETITIONS.size,
-            ).map { it.league.league.id }.toSet()
+            val currentSeasons = if (selectedTeamIds == null) {
+                selectApiFootballCurrentSeasons(
+                    leagues = leagues,
+                    currentYear = today.year,
+                    requestLimit = minOf(
+                        limits.maxUpcomingSeasonRequestsPerSync,
+                        (availableAfterCatalog + 1) / 2,
+                    ),
+                    selectedCompetitionIds = selectedCompetitionIds,
+                    syncStates = previousSeasonStates,
+                )
+            } else {
+                emptyList()
+            }
+            val catalogCurrentSeasonIds = catalogCurrentSeasons.map { it.league.league.id }.toSet()
             dao.upsertSyncMetadata(
                 SyncMetadataEntity(
                     API_FOOTBALL_TARGET_CURRENT_SEASONS_KEY,
@@ -744,77 +847,224 @@ class LocalSyncRepository(
             val fullyFetchedSeasonIds = mutableSetOf<String>()
 
             onProgress(SyncProgress(1, 2, "Zielwettbewerbe und aktuelle Spielzeiten werden geladen …"))
-            for ((index, request) in currentSeasons.withIndex()) {
-                if (requests >= limits.maxRequestsPerSync) break
-                try {
-                    countRequest()
-                    attemptedSeasonRequests += request
-                    val isFullSeasonBackfill =
-                        previousSeasonStates[request.seasonId]?.lastSuccessfulFetch == null
-                    val response = api.fixtures(
-                        apiKey,
-                        apiFootballCurrentFixtureQueryParameters(
-                            leagueId = request.league.league.id,
-                            seasonYear = request.seasonYear,
-                            today = today,
-                            historyDays = limits.upcomingDays,
-                            upcomingDays = limits.upcomingDays,
-                            fullSeasonBackfill = isFullSeasonBackfill,
+            if (selectedTeamIds == null) {
+                for ((index, request) in currentSeasons.withIndex()) {
+                    if (requests >= limits.maxRequestsPerSync) break
+                    try {
+                        countRequest()
+                        attemptedSeasonRequests += request
+                        val isFullSeasonBackfill =
+                            previousSeasonStates[request.seasonId]?.lastSuccessfulFetch == null
+                        val response = api.fixtures(
+                            apiKey,
+                            apiFootballCurrentFixtureQueryParameters(
+                                leagueId = request.league.league.id,
+                                seasonYear = request.seasonYear,
+                                today = today,
+                                historyDays = limits.upcomingDays,
+                                upcomingDays = limits.upcomingDays,
+                                fullSeasonBackfill = isFullSeasonBackfill,
+                            ),
+                        )
+                        fixtureRows += validatedBody(response).response.orEmpty()
+                            .map { it.withRequestedSeasonYear(request.seasonYear) }
+                        if (isFullSeasonBackfill) fullyFetchedSeasonIds += request.seasonId
+                    } catch (exception: Exception) {
+                        if (exception is kotlinx.coroutines.CancellationException) throw exception
+                        errors += syncFailureMessage(exception)
+                        break
+                    }
+                    onProgress(
+                        SyncProgress(
+                            index + 2,
+                            currentSeasons.size + 2,
+                            "Anstehende Spielzeiten ${index + 1}/${currentSeasons.size}",
                         ),
                     )
-                    fixtureRows += validatedBody(response).response.orEmpty()
-                        .map { it.withRequestedSeasonYear(request.seasonYear) }
-                    if (isFullSeasonBackfill) fullyFetchedSeasonIds += request.seasonId
-                } catch (exception: Exception) {
-                    if (exception is kotlinx.coroutines.CancellationException) throw exception
-                    errors += syncFailureMessage(exception)
-                    break
                 }
-                onProgress(
-                    SyncProgress(index + 2, currentSeasons.size + 2, "Anstehende Spielzeiten ${index + 1}/${currentSeasons.size}"),
+
+                val historySeasons = selectApiFootballHistoricalSeasons(
+                    leagues = leagues,
+                    currentYear = today.year,
+                    historicalYears = minOf(limits.historicalYears, 1),
+                    seasonsPerLeague = 1,
+                    requestLimit = minOf(
+                        limits.maxHistoricalSeasonRequestsPerSync,
+                        limits.maxRequestsPerSync - requests,
+                        providerDailyRemaining ?: 0,
+                        providerMinuteRemaining ?: 0,
+                    ),
+                    selectedCompetitionIds = selectedCompetitionIds,
+                    syncStates = previousSeasonStates,
+                    includeCurrentSeason = false,
                 )
-            }
 
-            val historySeasons = selectApiFootballHistoricalSeasons(
-                leagues = leagues,
-                currentYear = today.year,
-                historicalYears = minOf(limits.historicalYears, 1),
-                seasonsPerLeague = 1,
-                requestLimit = minOf(
-                    limits.maxHistoricalSeasonRequestsPerSync,
-                    limits.maxRequestsPerSync - requests,
-                    providerDailyRemaining ?: 0,
-                    providerMinuteRemaining ?: 0,
-                ),
-                syncStates = previousSeasonStates,
-                includeCurrentSeason = false,
-            )
-
-            for ((index, request) in historySeasons.withIndex()) {
-                if (errors.isNotEmpty()) break
-                if (requests >= limits.maxRequestsPerSync) break
-                try {
-                    countRequest()
-                    attemptedSeasonRequests += request
-                    val response = api.fixtures(
-                        apiKey,
-                        apiFootballFixtureQueryParameters(
-                            leagueId = request.league.league.id,
-                            seasonYear = request.seasonYear,
+                for ((index, request) in historySeasons.withIndex()) {
+                    if (errors.isNotEmpty()) break
+                    if (requests >= limits.maxRequestsPerSync) break
+                    try {
+                        countRequest()
+                        attemptedSeasonRequests += request
+                        val response = api.fixtures(
+                            apiKey,
+                            apiFootballFixtureQueryParameters(
+                                leagueId = request.league.league.id,
+                                seasonYear = request.seasonYear,
+                            ),
+                        )
+                        val responseBody = validatedBody(response)
+                        fixtureRows += responseBody.response.orEmpty()
+                            .map { it.withRequestedSeasonYear(request.seasonYear) }
+                        fullyFetchedSeasonIds += request.seasonId
+                    } catch (exception: Exception) {
+                        if (exception is kotlinx.coroutines.CancellationException) throw exception
+                        errors += syncFailureMessage(exception)
+                        break
+                    }
+                    onProgress(
+                        SyncProgress(
+                            index + 2,
+                            historySeasons.size + 2,
+                            "Historische Spielzeiten ${index + 1}/${historySeasons.size}",
                         ),
                     )
-                    val responseBody = validatedBody(response)
-                    fixtureRows += responseBody.response.orEmpty()
-                        .map { it.withRequestedSeasonYear(request.seasonYear) }
-                    fullyFetchedSeasonIds += request.seasonId
-                } catch (exception: Exception) {
-                    if (exception is kotlinx.coroutines.CancellationException) throw exception
-                    errors += syncFailureMessage(exception)
-                    break
                 }
-                onProgress(
-                    SyncProgress(index + 2, historySeasons.size + 2, "Historische Spielzeiten ${index + 1}/${historySeasons.size}"),
+            } else {
+                val competitionCodes = selectedCompetitionIds.map { "api-football:$it" }
+                val availableTeamIds = if (competitionCodes.isEmpty()) {
+                    emptySet()
+                } else {
+                    dao.teamsInCompetitions(competitionCodes).map { it.providerTeamId }.toSet()
+                }
+                val teamIds = selectedTeamIds.intersect(availableTeamIds)
+                val syncMetadata = dao.allSyncMetadata().associate { it.key to it.value }
+                val teamSeasonLastSync = syncMetadata.mapNotNull { (key, value) ->
+                    key.removePrefix(TEAM_SEASON_LAST_SYNC_PREFIX)
+                        .takeIf { key.startsWith(TEAM_SEASON_LAST_SYNC_PREFIX) }
+                        ?.let { it to value }
+                }.toMap().toMutableMap()
+                val completedTeamSeasons = syncMetadata.keys
+                    .filter { it.startsWith(TEAM_SEASON_COMPLETE_PREFIX) }
+                    .map { it.removePrefix(TEAM_SEASON_COMPLETE_PREFIX) }
+                    .toMutableSet()
+                val currentSeasonYears = catalogCurrentSeasons.map { it.seasonYear }.toSet()
+                val currentTeamRequests = selectApiFootballTeamSeasonRequests(
+                    teamIds = teamIds,
+                    seasonYears = currentSeasonYears,
+                    requestLimit = minOf(
+                        limits.maxUpcomingSeasonRequestsPerSync,
+                        (availableAfterCatalog + 1) / 2,
+                    ),
+                    lastSyncByTeamSeason = teamSeasonLastSync,
+                    includeCompleted = true,
                 )
+                for ((index, request) in currentTeamRequests.withIndex()) {
+                    if (requests >= limits.maxRequestsPerSync) break
+                    try {
+                        val completedKey = request.key
+                        val fullSeasonBackfill = completedKey !in completedTeamSeasons
+                        countRequest()
+                        val response = api.fixtures(
+                            apiKey,
+                            apiFootballCurrentTeamFixtureQueryParameters(
+                                teamId = request.teamId,
+                                seasonYear = request.seasonYear,
+                                today = today,
+                                historyDays = limits.upcomingDays,
+                                upcomingDays = limits.upcomingDays,
+                                fullSeasonBackfill = fullSeasonBackfill,
+                            ),
+                        )
+                        val rows = validatedBody(response).response.orEmpty()
+                            .map { it.withRequestedSeasonYear(request.seasonYear) }
+                            .filter { it.league.id in selectedCompetitionIds }
+                            .filter {
+                                it.teams.home?.id == request.teamId || it.teams.away?.id == request.teamId
+                            }
+                        fixtureRows += rows
+                        val fetchedAt = Instant.now().toString()
+                        teamSeasonLastSync[request.key] = fetchedAt
+                        dao.upsertSyncMetadata(
+                            SyncMetadataEntity("$TEAM_SEASON_LAST_SYNC_PREFIX${request.key}", fetchedAt),
+                        )
+                        if (fullSeasonBackfill) {
+                            completedTeamSeasons += completedKey
+                            dao.upsertSyncMetadata(
+                                SyncMetadataEntity("$TEAM_SEASON_COMPLETE_PREFIX$completedKey", fetchedAt),
+                            )
+                        }
+                    } catch (exception: Exception) {
+                        if (exception is kotlinx.coroutines.CancellationException) throw exception
+                        errors += syncFailureMessage(exception)
+                        break
+                    }
+                    onProgress(
+                        SyncProgress(
+                            index + 2,
+                            currentTeamRequests.size + 2,
+                            "Mannschaftsspielpläne ${index + 1}/${currentTeamRequests.size}",
+                        ),
+                    )
+                }
+
+                val historicalYears = leagues.flatMap { league ->
+                    val activeYear = league.seasons.orEmpty()
+                        .filter { it.current == true || (it.current == null && it.year == today.year) }
+                        .maxOfOrNull { it.year }
+                        ?: today.year
+                    league.seasons.orEmpty()
+                        .map { it.year }
+                        .filter { it < activeYear && it >= activeYear - minOf(limits.historicalYears, 1) }
+                }.toSet() - currentSeasonYears
+                val historicalTeamRequests = selectApiFootballTeamSeasonRequests(
+                    teamIds = teamIds,
+                    seasonYears = historicalYears,
+                    requestLimit = minOf(
+                        limits.maxHistoricalSeasonRequestsPerSync,
+                        limits.maxRequestsPerSync - requests,
+                        providerDailyRemaining ?: 0,
+                        providerMinuteRemaining ?: 0,
+                    ),
+                    lastSyncByTeamSeason = teamSeasonLastSync,
+                    completedTeamSeasons = completedTeamSeasons,
+                )
+                for ((index, request) in historicalTeamRequests.withIndex()) {
+                    if (errors.isNotEmpty() || requests >= limits.maxRequestsPerSync) break
+                    try {
+                        countRequest()
+                        val response = api.fixtures(
+                            apiKey,
+                            apiFootballTeamFixtureQueryParameters(request.teamId, request.seasonYear),
+                        )
+                        val rows = validatedBody(response).response.orEmpty()
+                            .map { it.withRequestedSeasonYear(request.seasonYear) }
+                            .filter { it.league.id in selectedCompetitionIds }
+                            .filter {
+                                it.teams.home?.id == request.teamId || it.teams.away?.id == request.teamId
+                            }
+                        fixtureRows += rows
+                        val fetchedAt = Instant.now().toString()
+                        teamSeasonLastSync[request.key] = fetchedAt
+                        completedTeamSeasons += request.key
+                        dao.upsertSyncMetadata(
+                            SyncMetadataEntity("$TEAM_SEASON_LAST_SYNC_PREFIX${request.key}", fetchedAt),
+                        )
+                        dao.upsertSyncMetadata(
+                            SyncMetadataEntity("$TEAM_SEASON_COMPLETE_PREFIX${request.key}", fetchedAt),
+                        )
+                    } catch (exception: Exception) {
+                        if (exception is kotlinx.coroutines.CancellationException) throw exception
+                        errors += syncFailureMessage(exception)
+                        break
+                    }
+                    onProgress(
+                        SyncProgress(
+                            index + 2,
+                            historicalTeamRequests.size + 2,
+                            "Historische Teamdaten ${index + 1}/${historicalTeamRequests.size}",
+                        ),
+                    )
+                }
             }
             if (errors.isEmpty()) {
                 val standingsToRefresh = currentSeasons.filter { request ->
