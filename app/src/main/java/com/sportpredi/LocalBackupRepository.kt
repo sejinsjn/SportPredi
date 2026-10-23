@@ -18,8 +18,6 @@ private data class LocalBackupDocument(
     val backtestRuns: List<BacktestRunEntity>?,
     val backtestMetrics: List<BacktestModelMetricEntity>?,
     val backtestPredictions: List<BacktestPredictionEntity>?,
-    val historicalMatchStatistics: List<HistoricalMatchStatisticsEntity>? = null,
-    val additionalFixtureData: List<AdditionalFixtureDataEntity>? = null,
 )
 
 class LocalBackupRepository(private val database: SportPrediDatabase) {
@@ -41,8 +39,6 @@ class LocalBackupRepository(private val database: SportPrediDatabase) {
                 backtestRuns = dao.allBacktestRuns(),
                 backtestMetrics = dao.allBacktestMetrics(),
                 backtestPredictions = dao.allBacktestPredictions(),
-                historicalMatchStatistics = dao.allHistoricalMatchStatistics(),
-                additionalFixtureData = dao.allAdditionalFixtureData(),
             ),
         )
     }
@@ -77,9 +73,6 @@ class LocalBackupRepository(private val database: SportPrediDatabase) {
             ?: throw IllegalArgumentException("Backtest-Metriken fehlen in der Sicherung.")
         val backtestPredictions = document.backtestPredictions
             ?: throw IllegalArgumentException("Backtest-Prognosen fehlen in der Sicherung.")
-        val historicalMatchStatistics = document.historicalMatchStatistics.orEmpty()
-        val additionalFixtureData = document.additionalFixtureData.orEmpty()
-
         validate(
             competitions,
             seasons,
@@ -92,16 +85,13 @@ class LocalBackupRepository(private val database: SportPrediDatabase) {
                 if (metric.scope.isNullOrBlank()) metric.copy(scope = "all") else metric
             },
             backtestPredictions,
-            historicalMatchStatistics,
-            additionalFixtureData,
         )
 
         database.withTransaction {
+            val localRequestBudget = dao.syncMetadata(API_FOOTBALL_DAILY_REQUESTS_KEY)
             dao.clearBacktestPredictions()
             dao.clearBacktestMetrics()
             dao.clearBacktestRuns()
-            dao.clearHistoricalMatchStatistics()
-            dao.clearAdditionalFixtureData()
             dao.clearPredictionEvaluations()
             dao.clearPredictions()
             dao.clearFixtures()
@@ -115,7 +105,9 @@ class LocalBackupRepository(private val database: SportPrediDatabase) {
             dao.upsertFixtures(fixtures)
             dao.insertPredictions(predictions)
             dao.insertPredictionEvaluations(predictionEvaluations)
-            syncMetadata.forEach { dao.upsertSyncMetadata(it) }
+            syncMetadata.filterNot { it.key == API_FOOTBALL_DAILY_REQUESTS_KEY }
+                .forEach { dao.upsertSyncMetadata(it) }
+            localRequestBudget?.let { dao.upsertSyncMetadata(it) }
             backtestRuns.forEach { dao.insertBacktestRun(it) }
             dao.insertBacktestMetrics(
                 backtestMetrics.map { metric ->
@@ -123,8 +115,6 @@ class LocalBackupRepository(private val database: SportPrediDatabase) {
                 },
             )
             dao.insertBacktestPredictions(backtestPredictions)
-            dao.upsertHistoricalMatchStatistics(historicalMatchStatistics)
-            dao.upsertAdditionalFixtureData(additionalFixtureData)
         }
     }
 
@@ -138,8 +128,6 @@ class LocalBackupRepository(private val database: SportPrediDatabase) {
         runs: List<BacktestRunEntity>,
         metrics: List<BacktestModelMetricEntity>,
         backtestPredictions: List<BacktestPredictionEntity>,
-        historicalMatchStatistics: List<HistoricalMatchStatisticsEntity>,
-        additionalFixtureData: List<AdditionalFixtureDataEntity>,
     ) {
         require(competitions.map { it.providerCode }.toSet().size == competitions.size) {
             "Doppelte Wettbewerbe in der Sicherung."
@@ -176,17 +164,9 @@ class LocalBackupRepository(private val database: SportPrediDatabase) {
         ) {
             "Ungültige oder doppelte Backtest-Prognosen in der Sicherung."
         }
-        require(
-            historicalMatchStatistics.map { it.providerMatchId }.toSet().size ==
-                historicalMatchStatistics.size,
-        ) {
-            "Doppelte StatsBomb-Spiele in der Sicherung."
-        }
-        require(
-            additionalFixtureData.map { it.localFixtureId }.toSet().size ==
-                additionalFixtureData.size,
-        ) {
-            "Doppelte Zusatzdaten-Spiele in der Sicherung."
+        require(competitions.all { it.providerCode.startsWith("api-football:") }) {
+            "Die Sicherung enthaelt Daten aus einer nicht mehr verwendeten Quelle; " +
+                "API-Football ist die einzige zulaessige Quelle."
         }
         val competitionIds = competitions.map { it.providerCode }.toSet()
         val seasonIds = seasons.map { it.id }.toSet()
@@ -207,9 +187,6 @@ class LocalBackupRepository(private val database: SportPrediDatabase) {
         require(predictions.all { it.providerFixtureId in fixtureIds }) {
             "Ein Prognose-Snapshot verweist auf ein unbekanntes Spiel."
         }
-        require(additionalFixtureData.all { it.localFixtureId in fixtureIds }) {
-            "Zusatzdaten verweisen auf ein unbekanntes Spiel."
-        }
         val predictionIds = predictions.map { it.id }.toSet()
         require(predictionEvaluations.all { it.predictionSnapshotId in predictionIds }) {
             "Eine Prognoseauswertung verweist auf einen unbekannten Snapshot."
@@ -226,6 +203,7 @@ class LocalBackupRepository(private val database: SportPrediDatabase) {
 
     companion object {
         private const val MINIMUM_SUPPORTED_FORMAT = 2
-        private const val FORMAT_VERSION = 5
+        private const val FORMAT_VERSION = 6
+        private const val API_FOOTBALL_DAILY_REQUESTS_KEY = "apiFootballRequestsToday"
     }
 }

@@ -99,53 +99,6 @@ data class PredictionSnapshotEntity(
     val analysisJson: String? = null,
 )
 
-@Entity(
-    tableName = "historical_match_statistics",
-    indices = [Index(value = ["competitionId", "seasonId", "matchDate"])],
-)
-data class HistoricalMatchStatisticsEntity(
-    @PrimaryKey val providerMatchId: Int,
-    val competitionId: Int,
-    val seasonId: Int,
-    val competitionName: String,
-    val country: String,
-    val seasonName: String,
-    val matchDate: String,
-    val kickoffAt: String?,
-    val homeTeam: String,
-    val awayTeam: String,
-    val homeScore: Int?,
-    val awayScore: Int?,
-    val homeXg: Double?,
-    val awayXg: Double?,
-    val homeShots: Int?,
-    val awayShots: Int?,
-    val homeYellowCards: Int?,
-    val awayYellowCards: Int?,
-    val homeRedCards: Int?,
-    val awayRedCards: Int?,
-    val homeLineupJson: String,
-    val awayLineupJson: String,
-    val sourceRevision: String,
-)
-
-@Entity(tableName = "additional_fixture_data")
-data class AdditionalFixtureDataEntity(
-    @PrimaryKey val localFixtureId: Long,
-    val oddsEventId: String?,
-    val oddsJson: String?,
-    val apiFootballFixtureId: Int?,
-    val homeXg: Double?,
-    val awayXg: Double?,
-    val homeShots: Int?,
-    val awayShots: Int?,
-    val homePossession: Double?,
-    val awayPossession: Double?,
-    val lineupsJson: String?,
-    val injuriesJson: String?,
-    val updatedAt: String,
-)
-
 @Entity(tableName = "prediction_evaluations")
 data class PredictionEvaluationEntity(
     @PrimaryKey val predictionSnapshotId: Long,
@@ -157,6 +110,13 @@ data class PredictionEvaluationEntity(
 data class SyncMetadataEntity(
     @PrimaryKey val key: String,
     val value: String,
+)
+
+@Entity(tableName = "api_football_standings_cache")
+data class ApiFootballStandingsCacheEntity(
+    @PrimaryKey val seasonId: String,
+    val rowsJson: String,
+    val fetchedAt: String,
 )
 
 @Entity(tableName = "backtest_runs")
@@ -231,15 +191,6 @@ data class FixtureDisplay(
     val expectedHomeGoals: Double?,
     val expectedAwayGoals: Double?,
     val analysisJson: String?,
-    val oddsJson: String?,
-    val homeXg: Double?,
-    val awayXg: Double?,
-    val homeShots: Int?,
-    val awayShots: Int?,
-    val homePossession: Double?,
-    val awayPossession: Double?,
-    val lineupsJson: String?,
-    val injuriesJson: String?,
 )
 
 data class SeasonCoverageRow(
@@ -285,32 +236,6 @@ interface SportPrediDao {
 
     @Upsert
     suspend fun insertPredictionEvaluations(items: List<PredictionEvaluationEntity>)
-
-    @Upsert
-    suspend fun upsertHistoricalMatchStatistics(items: List<HistoricalMatchStatisticsEntity>)
-
-    @Upsert
-    suspend fun upsertAdditionalFixtureData(items: List<AdditionalFixtureDataEntity>)
-
-    @Query("SELECT * FROM additional_fixture_data WHERE localFixtureId = :fixtureId LIMIT 1")
-    suspend fun additionalFixtureData(fixtureId: Long): AdditionalFixtureDataEntity?
-
-    @Query("SELECT * FROM additional_fixture_data ORDER BY localFixtureId")
-    suspend fun allAdditionalFixtureData(): List<AdditionalFixtureDataEntity>
-
-    @Query("DELETE FROM additional_fixture_data")
-    suspend fun clearAdditionalFixtureData()
-
-    @Query("DELETE FROM historical_match_statistics")
-    suspend fun clearHistoricalMatchStatistics()
-
-    @Query(
-        """
-        SELECT * FROM historical_match_statistics
-        ORDER BY matchDate DESC, kickoffAt DESC
-        """
-    )
-    suspend fun allHistoricalMatchStatistics(): List<HistoricalMatchStatisticsEntity>
 
     @Insert
     suspend fun insertBacktestRun(item: BacktestRunEntity): Long
@@ -417,6 +342,12 @@ interface SportPrediDao {
     @Upsert
     suspend fun upsertSyncMetadata(item: SyncMetadataEntity)
 
+    @Query("SELECT * FROM api_football_standings_cache WHERE seasonId = :seasonId LIMIT 1")
+    suspend fun apiFootballStandings(seasonId: String): ApiFootballStandingsCacheEntity?
+
+    @Upsert
+    suspend fun upsertApiFootballStandingsCache(item: ApiFootballStandingsCacheEntity)
+
     @Query(
         """
         SELECT f.providerFixtureId, f.kickoffAt, f.matchDate, f.status,
@@ -426,15 +357,12 @@ interface SportPrediDao {
                home.name AS homeTeamName, away.name AS awayTeamName,
                f.homeScore, f.awayScore,
                p.homeWinProbability, p.drawProbability, p.awayWinProbability,
-               p.expectedHomeGoals, p.expectedAwayGoals, p.analysisJson,
-               a.oddsJson, a.homeXg, a.awayXg, a.homeShots, a.awayShots,
-               a.homePossession, a.awayPossession, a.lineupsJson, a.injuriesJson
+               p.expectedHomeGoals, p.expectedAwayGoals, p.analysisJson
         FROM fixtures f
         LEFT JOIN competitions c ON c.providerCode = f.competitionCode
         LEFT JOIN seasons s ON s.id = f.seasonId
         LEFT JOIN teams home ON home.providerTeamId = f.homeTeamId
         LEFT JOIN teams away ON away.providerTeamId = f.awayTeamId
-        LEFT JOIN additional_fixture_data a ON a.localFixtureId = f.providerFixtureId
         LEFT JOIN prediction_snapshots p
           ON p.id = (
             SELECT p2.id FROM prediction_snapshots p2
@@ -463,8 +391,7 @@ interface SportPrediDao {
     @Query(
         """
         SELECT * FROM fixtures
-        WHERE competitionCode = :competitionCode
-          AND fullTimeResult = 1 AND matchDate < :beforeDate
+        WHERE fullTimeResult = 1 AND matchDate < :beforeDate
           AND homeScore IS NOT NULL AND awayScore IS NOT NULL
           AND (homeTeamId = :teamId OR awayTeamId = :teamId)
         ORDER BY matchDate DESC, kickoffAt DESC
@@ -472,7 +399,6 @@ interface SportPrediDao {
         """
     )
     suspend fun teamHistory(
-        competitionCode: String,
         teamId: Int,
         beforeDate: String,
         limit: Int,
@@ -558,13 +484,12 @@ interface SportPrediDao {
         PredictionSnapshotEntity::class,
         PredictionEvaluationEntity::class,
         SyncMetadataEntity::class,
-        HistoricalMatchStatisticsEntity::class,
         BacktestRunEntity::class,
         BacktestModelMetricEntity::class,
         BacktestPredictionEntity::class,
-        AdditionalFixtureDataEntity::class,
+        ApiFootballStandingsCacheEntity::class,
     ],
-    version = 8,
+    version = 10,
     exportSchema = false,
 )
 abstract class SportPrediDatabase : RoomDatabase() {
@@ -588,6 +513,8 @@ abstract class SportPrediDatabase : RoomDatabase() {
                     MIGRATION_5_6,
                     MIGRATION_6_7,
                     MIGRATION_7_8,
+                    MIGRATION_8_9,
+                    MIGRATION_9_10,
                 ).build().also { instance = it }
             }
 
@@ -755,6 +682,37 @@ abstract class SportPrediDatabase : RoomDatabase() {
                         injuriesJson TEXT,
                         updatedAt TEXT NOT NULL,
                         PRIMARY KEY(localFixtureId)
+                    )
+                    """.trimIndent(),
+                )
+            }
+        }
+
+        internal val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("DELETE FROM prediction_evaluations")
+                database.execSQL("DELETE FROM prediction_snapshots")
+                database.execSQL("DELETE FROM backtest_predictions")
+                database.execSQL("DELETE FROM backtest_model_metrics")
+                database.execSQL("DELETE FROM backtest_runs")
+                database.execSQL("DROP TABLE IF EXISTS additional_fixture_data")
+                database.execSQL("DROP TABLE IF EXISTS historical_match_statistics")
+                database.execSQL("DELETE FROM fixtures")
+                database.execSQL("DELETE FROM teams")
+                database.execSQL("DELETE FROM seasons")
+                database.execSQL("DELETE FROM competitions")
+                database.execSQL("DELETE FROM sync_metadata")
+            }
+        }
+
+        internal val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS api_football_standings_cache (
+                        seasonId TEXT NOT NULL PRIMARY KEY,
+                        rowsJson TEXT NOT NULL,
+                        fetchedAt TEXT NOT NULL
                     )
                     """.trimIndent(),
                 )

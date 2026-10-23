@@ -28,7 +28,58 @@ data class LocalBacktestReport(
     val validationEndDate: String?,
     val selectedDixonColesRho: Double,
     val selectedHalfLifeDays: Double,
-)
+) {
+    val holdoutComparisons: List<HoldoutAccuracyComparison>
+        get() = compareHoldoutAccuracies(models)
+}
+
+data class HoldoutAccuracyComparison(
+    val candidateModelVersion: String,
+    val baselineModelVersion: String,
+    val candidateSamples: Int,
+    val baselineSamples: Int,
+    val candidateAccuracy: Double?,
+    val baselineAccuracy: Double?,
+    val improvement: Double?,
+) {
+    val meetsAccuracyGoal: Boolean
+        get() = candidateSamples >= MIN_HOLDOUT_SAMPLES_FOR_GOAL &&
+            candidateAccuracy?.let { it >= MODEL_ACCURACY_GOAL } == true
+}
+
+internal const val OLD_BACKTEST_BASELINE_MODEL_VERSION = "poisson-form-local-v1"
+internal const val MODEL_ACCURACY_GOAL = 0.90
+internal const val MIN_HOLDOUT_SAMPLES_FOR_GOAL = 30
+
+internal fun compareHoldoutAccuracies(
+    metrics: List<LocalModelMetric>,
+    baselineModelVersion: String = OLD_BACKTEST_BASELINE_MODEL_VERSION,
+): List<HoldoutAccuracyComparison> {
+    val testMetrics = metrics.filter { it.scope == "test" }
+    val baseline = testMetrics.firstOrNull { it.modelVersion == baselineModelVersion }
+        ?: return emptyList()
+    return testMetrics
+        .filter { it.modelVersion != baselineModelVersion }
+        .map { candidate ->
+            HoldoutAccuracyComparison(
+                candidateModelVersion = candidate.modelVersion,
+                baselineModelVersion = baselineModelVersion,
+                candidateSamples = candidate.sampleSize,
+                baselineSamples = baseline.sampleSize,
+                candidateAccuracy = candidate.accuracy,
+                baselineAccuracy = baseline.accuracy,
+                improvement = if (
+                    candidate.sampleSize == baseline.sampleSize &&
+                    candidate.accuracy != null &&
+                    baseline.accuracy != null
+                ) {
+                    candidate.accuracy - baseline.accuracy
+                } else {
+                    null
+                },
+            )
+        }
+}
 
 private class MetricAccumulator {
     var count = 0
@@ -276,20 +327,18 @@ class LocalBacktestEngine(private val database: SportPrediDatabase) {
         onlyScope: String?,
         onCase: suspend (BacktestCase, String) -> Unit,
     ) {
-        fixtures.groupBy { it.competitionCode }.values.forEach { competitionFixtures ->
-            val state = LocalForecastingState(parameters)
-            competitionFixtures.groupBy { it.matchDate }.toSortedMap().forEach { (day, matches) ->
-                val date = LocalDate.parse(day)
-                val forecasts = matches.mapNotNull { fixture ->
-                    if (!state.hasMinimumHistory(fixture)) return@mapNotNull null
-                    fixture.toBacktestCase(state.forecast(fixture))
-                }
-                val scope = split.scope(date)
-                if (onlyScope == null || onlyScope == scope) {
-                    forecasts.forEach { onCase(it, scope) }
-                }
-                matches.forEach(state::addCompletedMatch)
+        val state = LocalForecastingState(parameters)
+        fixtures.groupBy { it.matchDate }.toSortedMap().forEach { (day, matches) ->
+            val date = LocalDate.parse(day)
+            val forecasts = matches.mapNotNull { fixture ->
+                if (!state.hasMinimumHistory(fixture)) return@mapNotNull null
+                fixture.toBacktestCase(state.forecast(fixture))
             }
+            val scope = split.scope(date)
+            if (onlyScope == null || onlyScope == scope) {
+                forecasts.forEach { onCase(it, scope) }
+            }
+            matches.forEach(state::addCompletedMatch)
         }
     }
 
@@ -343,7 +392,7 @@ class LocalBacktestEngine(private val database: SportPrediDatabase) {
         private const val MINIMUM_SPLIT_DATES = 5
         private const val TRAIN_FRACTION = 0.60
         private const val VALIDATION_FRACTION = 0.80
-        private const val MODEL_EXISTING = "poisson-form-local-v1"
+        private const val MODEL_EXISTING = OLD_BACKTEST_BASELINE_MODEL_VERSION
         private const val MODEL_EMPIRICAL = "league-outcome-baseline-v1"
         private const val MODEL_ELO = "elo-dynamic-local-v1"
         private const val MODEL_POISSON = "poisson-time-decay-local-v2"

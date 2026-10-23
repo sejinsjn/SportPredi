@@ -55,9 +55,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.google.gson.Gson
-import com.google.gson.JsonParser
 import com.google.gson.JsonParseException
-import com.google.gson.reflect.TypeToken
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneOffset
@@ -84,9 +82,16 @@ class MainActivity : ComponentActivity() {
 private enum class AppPage {
     FIXTURES,
     PERFORMANCE,
-    STATSBOMB,
     SETTINGS,
 }
+
+private data class TargetCatalogUiData(
+    val coverageRows: List<SeasonCoverageRow>,
+    val checkedAt: String?,
+    val availableIds: String?,
+    val missingIds: String?,
+    val currentSeasonIds: String?,
+)
 
 @Composable
 private fun AppScreen(database: SportPrediDatabase) {
@@ -96,12 +101,11 @@ private fun AppScreen(database: SportPrediDatabase) {
     val dao = remember(database) { database.sportPrediDao() }
     val apiCredentialsStore = remember(context) { ApiCredentialsStore(context) }
     val syncRepository = remember(database) {
-        LocalSyncRepository(context.applicationContext, database, OpenLigaDbApi.create())
+        LocalSyncRepository(database)
     }
     var selectedPage by remember { mutableStateOf(AppPage.FIXTURES) }
     var menuExpanded by remember { mutableStateOf(false) }
     var showApiCredentials by remember { mutableStateOf(false) }
-    var oddsApiKey by remember { mutableStateOf("") }
     var apiFootballKey by remember { mutableStateOf("") }
     var apiCredentialsMessage by remember { mutableStateOf<String?>(null) }
     var apiCredentialsError by remember { mutableStateOf(false) }
@@ -122,28 +126,30 @@ private fun AppScreen(database: SportPrediDatabase) {
             syncError = null
             try {
                 val report = withContext(Dispatchers.IO) {
-                    syncRepository.synchronize(force = force) { progress ->
+                    syncRepository.synchronize(
+                        apiKey = apiCredentialsStore.load().apiFootballKey,
+                        force = force,
+                    ) { progress ->
                         Handler(Looper.getMainLooper()).post {
                             syncMessage = progress.message
                         }
                     }
                 }
-                val supplementaryReport = withContext(Dispatchers.IO) {
-                    SupplementaryDataSync(database).synchronize(apiCredentialsStore.load())
-                }
                 val predictionsCreated = withContext(Dispatchers.IO) {
                     LocalPredictionEngine(dao).refreshUpcomingPredictions()
                 }
                 lastUpdated = report.completedAt
-                syncMessage =
-                    "${report.seasonsChecked} OpenLigaDB-Spielzeiten geprüft; " +
-                        "${report.openFootballFilesProcessed} OpenFootball-Dateien verarbeitet " +
-                        "(${report.openFootballPendingFiles} ausstehend); " +
-                        "${report.fixturesImported} Spiele importiert; " +
-                        "$predictionsCreated Prognose-Snapshots neu erstellt; " +
-                        "${supplementaryReport.oddsEventsSaved} Quoten-Sätze und " +
-                        "${supplementaryReport.footballMatchesEnriched} API-Football-Spiele ergänzt."
-                val errors = report.errors + supplementaryReport.errors
+                syncMessage = if (report.wasThrottled) {
+                    "API-Football-Anfrage wegen des lokalen Cooldowns ausgelassen."
+                } else {
+                    "${report.competitionsChecked} API-Football-Wettbewerbe; " +
+                        "${report.fixturesImported} Spiele; ${report.requestsUsed}/" +
+                        "${LocalSyncRepository.MAX_REQUESTS_PER_SYNC} kontingentpflichtige API-Aufrufe " +
+                        "(Statuscheck ausgenommen); " +
+                        "$predictionsCreated Prognose-Snapshots erstellt." +
+                        missingTargetSummary(report)
+                }
+                val errors = report.errors
                 if (errors.isNotEmpty()) syncError = errors.joinToString("\n")
             } catch (exception: CancellationException) {
                 throw exception
@@ -153,7 +159,7 @@ private fun AppScreen(database: SportPrediDatabase) {
             } finally {
                 syncLoading = false
                 lastUpdated = withContext(Dispatchers.IO) {
-                    dao.syncMetadata("lastSyncAt")?.value ?: lastUpdated
+                    dao.syncMetadata("lastApiFootballSyncAt")?.value ?: lastUpdated
                 }
                 coverageRefresh += 1
             }
@@ -189,51 +195,33 @@ private fun AppScreen(database: SportPrediDatabase) {
 
     LaunchedEffect(Unit) {
         syncLoading = true
-        syncMessage = "Vorbereitete historische Datenbasis wird lokal geladen …"
-        val startupErrors = mutableListOf<String>()
-        lastUpdated = withContext(Dispatchers.IO) {
-            dao.syncMetadata("lastSyncAt")?.value
-        }
+        syncMessage = "API-Football-Daten werden vorbereitet ..."
         try {
             val report = withContext(Dispatchers.IO) {
-                syncRepository.initializeBundledHistory { message ->
-                    Handler(Looper.getMainLooper()).post { syncMessage = message }
-                }
-            }
-            val statsBombImported = try {
-                withContext(Dispatchers.IO) {
-                    StatsBombHistoryImporter(database).importBundledHistory(context.applicationContext)
-                }
-            } catch (exception: CancellationException) {
-                throw exception
-            } catch (exception: Exception) {
-                startupErrors += "StatsBomb-Historie konnte nicht geladen werden: " +
-                    (exception.message ?: "Unbekannter Fehler")
-                0
+                syncRepository.synchronize(apiCredentialsStore.load().apiFootballKey)
             }
             val predictionsCreated = withContext(Dispatchers.IO) {
                 LocalPredictionEngine(dao).refreshUpcomingPredictions()
             }
-            syncMessage = if (
-                report.filesProcessed == 0 &&
-                report.errors.isEmpty() &&
-                statsBombImported == 0
-            ) {
-                "Lokale Datenbasis bereit. Beim App-Start wurde keine Internetverbindung verwendet."
+            syncMessage = if (report.wasThrottled) {
+                "API-Football-Abfrage wegen des lokalen Cooldowns ausgelassen."
+            } else if (report.requestsUsed == 0 && report.errors.isEmpty()) {
+                "API-Football-Daten sind aktuell."
             } else {
-                "${report.fixturesImported} historische Spiele aus ${report.filesProcessed} Dateien " +
-                    "importiert; $statsBombImported StatsBomb-Spiele ergänzt; " +
-                    "$predictionsCreated Prognose-Snapshots erstellt."
+                "${report.fixturesImported} Spiele synchronisiert; $predictionsCreated Prognose-Snapshots erstellt." +
+                    missingTargetSummary(report)
             }
-            startupErrors += report.errors
-            if (startupErrors.isNotEmpty()) syncError = startupErrors.joinToString("\n")
+            if (report.errors.isNotEmpty()) syncError = report.errors.joinToString("\n")
         } catch (exception: CancellationException) {
             throw exception
         } catch (exception: Exception) {
             syncError = syncFailureMessage(exception)
-            syncMessage = "Lokaler Import der vorbereiteten Datenbasis fehlgeschlagen."
+            syncMessage = "API-Football-Synchronisierung fehlgeschlagen."
         } finally {
             syncLoading = false
+            lastUpdated = withContext(Dispatchers.IO) {
+                dao.syncMetadata("lastApiFootballSyncAt")?.value ?: lastUpdated
+            }
             coverageRefresh += 1
         }
     }
@@ -278,13 +266,6 @@ private fun AppScreen(database: SportPrediDatabase) {
                         },
                     )
                     DropdownMenuItem(
-                        text = { Text("StatsBomb-Historie") },
-                        onClick = {
-                            selectedPage = AppPage.STATSBOMB
-                            menuExpanded = false
-                        },
-                    )
-                    DropdownMenuItem(
                         text = { Text("Einstellungen") },
                         onClick = {
                             selectedPage = AppPage.SETTINGS
@@ -306,7 +287,6 @@ private fun AppScreen(database: SportPrediDatabase) {
                 onSynchronize = { synchronize(force = true) },
             )
             AppPage.PERFORMANCE -> PerformanceScreen(database)
-            AppPage.STATSBOMB -> StatsBombHistoryScreen(database)
             AppPage.SETTINGS -> SettingsScreen(
                 apiCredentialsMessage = apiCredentialsMessage,
                 apiCredentialsError = apiCredentialsError,
@@ -317,7 +297,6 @@ private fun AppScreen(database: SportPrediDatabase) {
                     scope.launch {
                         try {
                             val credentials = withContext(Dispatchers.IO) { apiCredentialsStore.load() }
-                            oddsApiKey = credentials.oddsApiKey
                             apiFootballKey = credentials.apiFootballKey
                             showApiCredentials = true
                         } catch (exception: Exception) {
@@ -352,14 +331,6 @@ private fun AppScreen(database: SportPrediDatabase) {
                         style = MaterialTheme.typography.bodySmall,
                     )
                     OutlinedTextField(
-                        value = oddsApiKey,
-                        onValueChange = { oddsApiKey = it },
-                        label = { Text("The Odds API") },
-                        visualTransformation = PasswordVisualTransformation(),
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    OutlinedTextField(
                         value = apiFootballKey,
                         onValueChange = { apiFootballKey = it },
                         label = { Text("API-Football") },
@@ -375,12 +346,7 @@ private fun AppScreen(database: SportPrediDatabase) {
                         scope.launch {
                             try {
                                 withContext(Dispatchers.IO) {
-                                    apiCredentialsStore.save(
-                                        ApiCredentials(
-                                            oddsApiKey = oddsApiKey,
-                                            apiFootballKey = apiFootballKey,
-                                        ),
-                                    )
+                                    apiCredentialsStore.saveApiFootballKey(apiFootballKey)
                                 }
                                 showApiCredentials = false
                                 apiCredentialsError = false
@@ -401,12 +367,11 @@ private fun AppScreen(database: SportPrediDatabase) {
                 Row {
                     TextButton(
                         onClick = {
-                            oddsApiKey = ""
                             apiFootballKey = ""
                             scope.launch {
                                 try {
                                     withContext(Dispatchers.IO) {
-                                        apiCredentialsStore.save(ApiCredentials("", ""))
+                                        apiCredentialsStore.saveApiFootballKey("")
                                     }
                                     showApiCredentials = false
                                     apiCredentialsError = false
@@ -454,7 +419,7 @@ private fun AppScreen(database: SportPrediDatabase) {
                                 }
                                 withContext(Dispatchers.IO) { backupRepository.importJson(json) }
                                 lastUpdated = withContext(Dispatchers.IO) {
-                                    dao.syncMetadata("lastSyncAt")?.value
+                                    dao.syncMetadata("lastApiFootballSyncAt")?.value
                                 }
                                 coverageRefresh += 1
                                 syncMessage = "Lokale Sicherung wiederhergestellt."
@@ -592,6 +557,11 @@ private fun FixturesScreen(
     val fixtures by dao.observeUpcoming(today.toString(), endDate.toString())
         .collectAsState(initial = emptyList())
     var coverageRows by remember { mutableStateOf(emptyList<SeasonCoverageRow>()) }
+    var targetCatalogChecked by remember { mutableStateOf(false) }
+    var targetCatalogCheckedAt by remember { mutableStateOf<String?>(null) }
+    var targetCatalogAvailableIds by remember { mutableStateOf(emptySet<Int>()) }
+    var targetCatalogMissingIds by remember { mutableStateOf(emptySet<Int>()) }
+    var targetCatalogCurrentSeasonIds by remember { mutableStateOf(emptySet<Int>()) }
     var selectedFixture by remember { mutableStateOf<FixtureDisplay?>(null) }
     var showFixturesInfo by remember { mutableStateOf(false) }
     var restoreListScrollPosition by remember { mutableStateOf(false) }
@@ -601,7 +571,21 @@ private fun FixturesScreen(
         selectedFixture = null
     }
     LaunchedEffect(database, lastUpdated, coverageRefresh) {
-        coverageRows = withContext(Dispatchers.IO) { dao.seasonCoverage() }
+        val result = withContext(Dispatchers.IO) {
+            TargetCatalogUiData(
+                coverageRows = dao.seasonCoverage(),
+                checkedAt = dao.syncMetadata(API_FOOTBALL_TARGET_CATALOG_CHECKED_KEY)?.value,
+                availableIds = dao.syncMetadata(API_FOOTBALL_TARGET_CATALOG_AVAILABLE_KEY)?.value,
+                missingIds = dao.syncMetadata(API_FOOTBALL_TARGET_CATALOG_MISSING_KEY)?.value,
+                currentSeasonIds = dao.syncMetadata(API_FOOTBALL_TARGET_CURRENT_SEASONS_KEY)?.value,
+            )
+        }
+        coverageRows = result.coverageRows
+        targetCatalogChecked = result.checkedAt != null
+        targetCatalogCheckedAt = result.checkedAt
+        targetCatalogAvailableIds = parseApiFootballTargetIds(result.availableIds)
+        targetCatalogMissingIds = parseApiFootballTargetIds(result.missingIds)
+        targetCatalogCurrentSeasonIds = parseApiFootballTargetIds(result.currentSeasonIds)
     }
 
     val visibleFixtures = fixtures.filter { fixture ->
@@ -783,21 +767,36 @@ private fun FixturesScreen(
                 }
             }
         }
-        if (coverageRows.isNotEmpty()) {
+        if (coverageRows.isNotEmpty() || targetCatalogChecked) {
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(
                     modifier = Modifier.padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
                     Text("Datenbasis & Abdeckung", style = MaterialTheme.typography.titleLarge)
+                    if (targetCatalogChecked) {
+                        Text(
+                            "API-Football-Zielkatalog (exakte Wettbewerbs-IDs), zuletzt geprüft " +
+                                formatTimestamp(targetCatalogCheckedAt) + ":",
+                        )
+                        API_FOOTBALL_TARGET_COMPETITIONS.forEach { target ->
+                            val status = when {
+                                target.providerId in targetCatalogMissingIds -> "vom Katalog nicht geliefert"
+                                target.providerId !in targetCatalogAvailableIds -> "nicht bestätigt"
+                                target.providerId in targetCatalogCurrentSeasonIds -> "aktuelle Saison verfügbar"
+                                else -> "im Katalog, aber keine aktuelle Saison"
+                            }
+                            Text("${target.name} (${target.providerId}) · $status")
+                        }
+                    }
                     Text(
                         "${coverageRows.map { it.competitionCode }.distinct().size} Wettbewerbe · " +
                             "${coverageRows.size} Saisons · " +
                             "${coverageRows.sumOf { it.fixtureCount }} Spiele lokal gespeichert",
                     )
                     Text(
-                        "Das ist die tatsächlich importierte Abdeckung, keine Vollständigkeitszusage für Europa. " +
-                            "Fehlende Wettbewerbe werden von den Quellen nicht vollständig katalogisiert.",
+                        "Es werden nur die oben gelisteten exakten API-Football-IDs verwendet. " +
+                            "Nicht gelieferte Wettbewerbe werden nicht durch ähnlich benannte Ligen ersetzt.",
                         style = MaterialTheme.typography.bodySmall,
                     )
                     coverageRows.groupBy { it.competitionCode }.forEach { (code, seasons) ->
@@ -852,26 +851,20 @@ private fun FixturesScreen(
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     Text(
-                        "Quellen: OpenLigaDB, OpenFootball football.json (CC0) und ein ausgewählter " +
-                            "historischer StatsBomb-Datensatz. Nur tatsächlich verfügbare Wettbewerbe " +
-                            "werden angezeigt. Der versionierte Bestand wird offline importiert; " +
-                            "Live-Aktualisierungen bleiben auf 20 Spielzeiten bzw. Dateien je Sync begrenzt.",
+                        "Datenquelle: API-Football. Wettbewerbe, Spielzeiten, Mannschaften und Ergebnisse " +
+                            "werden ausschliesslich von dort geladen. Der Sync ist auf " +
+                            "${LocalSyncRepository.MAX_REQUESTS_PER_SYNC} kontingentpflichtige API-Aufrufe " +
+                            "begrenzt; der Statuscheck ist davon ausgenommen.",
                     )
                     Text(
-                        "Zusätzliche xG-, Schuss-, Ballbesitz-, Aufstellungs- und Verletzungsdaten können " +
-                            "über API-Football verfügbar sein. Das hängt von Wettbewerb und Tarif ab. " +
-                            "Sie werden angezeigt, fließen derzeit aber nicht in die Prognose ein. " +
-                            "StatsBomb enthält Werte nur für ausgewählte historische Spiele.",
+                        "Für alle kommenden Spiele werden 1X2-Wahrscheinlichkeiten und die wahrscheinlichste " +
+                            "Auswahl angezeigt. 90 % ist ein Modellziel, keine Ausgabeschwelle; die tatsächliche " +
+                            "Trefferquote und Verbesserung gegenüber dem alten Modell werden im zeitlichen " +
+                            "Holdout-Backtest berichtet.",
                     )
                     Text(
                         "Standardansicht: alle aktuell verfügbaren Wettbewerbe; Saison " +
                             "$currentSeasonLabel bis $currentSeasonEnd. Die Abdeckung hängt von den Datenquellen ab.",
-                    )
-                    Text(
-                        "Modelltipps vergleichen 1X2, Beide Teams treffen und Über/Unter 1,5 bzw. " +
-                            "2,5 Tore. Doppelte Chance und extreme Torlinien werden ausgeschlossen. " +
-                            "Ein Quoten-Tipp erscheint nur bei vorhandener Quote ab 1,50 und positivem " +
-                            "modelliertem Erwartungswert; das ist keine Gewinngarantie oder Wettberatung.",
                     )
                 }
             },
@@ -885,164 +878,30 @@ private fun FixturesScreen(
 }
 
 @Composable
-private fun StatsBombHistoryScreen(database: SportPrediDatabase) {
-    val dao = remember(database) { database.sportPrediDao() }
-    var matches by remember { mutableStateOf(emptyList<HistoricalMatchStatisticsEntity>()) }
-    var selectedMatch by remember { mutableStateOf<HistoricalMatchStatisticsEntity?>(null) }
-    var loading by remember { mutableStateOf(true) }
-    var loadError by remember { mutableStateOf<String?>(null) }
-
-    LaunchedEffect(database) {
-        try {
-            matches = withContext(Dispatchers.IO) { dao.allHistoricalMatchStatistics() }
-        } catch (exception: CancellationException) {
-            throw exception
-        } catch (exception: Exception) {
-            loadError = exception.message ?: "StatsBomb-Spiele konnten nicht geladen werden."
-        } finally {
-            loading = false
-        }
-    }
-
-    Column(
-        modifier = Modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        Text("StatsBomb Open Data", style = MaterialTheme.typography.headlineMedium)
-        Text(
-            if (loading) {
-                "Offline-Datensatz der 1. Bundesliga 2023/24 wird geladen …"
-            } else {
-                "Offline-Datensatz: ${matches.size} ausgewählte Spiele der 1. Bundesliga 2023/24. " +
-                    "Das ist keine vollständige Saisonabdeckung und enthält keine kommenden Spiele."
-            },
-        )
-        Text(
-            "xG, Schüsse, Karten und Aufstellungen stammen aus Ereignis- und Aufstellungsdaten. " +
-                "Ballbesitz und Verletzungen werden von diesem offenen Datensatz nicht geliefert. " +
-                "Wegen der lückenhaften Auswahl fließen diese Werte nicht in kommende Prognosen ein.",
-            style = MaterialTheme.typography.bodySmall,
-        )
-        Text(
-            "Datenquelle: StatsBomb Open Data · Quellrevision ${matches.firstOrNull()?.sourceRevision?.take(12) ?: "—"}",
-            style = MaterialTheme.typography.bodySmall,
-        )
-        loadError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-        if (loading) CircularProgressIndicator()
-        if (!loading && matches.isEmpty() && loadError == null) {
-            Text("Der lokale StatsBomb-Datensatz enthält keine Spiele.")
-        }
-        matches.forEach { match ->
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { selectedMatch = match },
-            ) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    Text(
-                        "${match.matchDate} · ${match.homeTeam} ${match.homeScore ?: "—"}:" +
-                            "${match.awayScore ?: "—"} ${match.awayTeam}",
-                        style = MaterialTheme.typography.titleSmall,
-                    )
-                    Text(
-                        "xG ${match.homeXg?.format(2) ?: "—"} : ${match.awayXg?.format(2) ?: "—"} · " +
-                            "Schüsse ${match.homeShots ?: "—"} : ${match.awayShots ?: "—"}",
-                    )
-                    Text(
-                        "Gelb ${match.homeYellowCards ?: "—"} : ${match.awayYellowCards ?: "—"} · " +
-                            "Rot ${match.homeRedCards ?: "—"} : ${match.awayRedCards ?: "—"}",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
-            }
-        }
-    }
-
-    selectedMatch?.let { match ->
-        StatsBombMatchDialog(match) { selectedMatch = null }
-    }
-}
-
-@Composable
-private fun StatsBombMatchDialog(
-    match: HistoricalMatchStatisticsEntity,
-    onDismiss: () -> Unit,
-) {
-    val lineupType = remember {
-        object : TypeToken<List<StatsBombLineupPlayer>>() {}.type
-    }
-    val lineups = remember(match.providerMatchId) {
-        try {
-            Gson().let { gson ->
-                gson.fromJson<List<StatsBombLineupPlayer>>(match.homeLineupJson, lineupType).orEmpty() to
-                    gson.fromJson<List<StatsBombLineupPlayer>>(match.awayLineupJson, lineupType).orEmpty()
-            }
-        } catch (exception: JsonParseException) {
-            null
-        }
-    }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("${match.homeTeam} – ${match.awayTeam}") },
-        text = {
-            Column(
-                modifier = Modifier
-                    .heightIn(max = 520.dp)
-                    .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                Text("${match.competitionName} · ${match.seasonName} · ${match.matchDate}")
-                Text("Endstand: ${match.homeScore ?: "—"} : ${match.awayScore ?: "—"}")
-                Text("xG: ${match.homeXg?.format(2) ?: "—"} : ${match.awayXg?.format(2) ?: "—"}")
-                Text("Schüsse: ${match.homeShots ?: "—"} : ${match.awayShots ?: "—"}")
-                Text(
-                    "Gelbe Karten: ${match.homeYellowCards ?: "—"} : ${match.awayYellowCards ?: "—"} · " +
-                        "Rote Karten: ${match.homeRedCards ?: "—"} : ${match.awayRedCards ?: "—"}",
-                )
-                Text("Ballbesitz und Verletzungsdaten: nicht enthalten.")
-                if (lineups == null) {
-                    Text("Aufstellungen konnten nicht gelesen werden.", color = MaterialTheme.colorScheme.error)
-                } else {
-                    Text("Aufstellungen", style = MaterialTheme.typography.titleSmall)
-                    StatsBombLineup(match.homeTeam, lineups.first)
-                    StatsBombLineup(match.awayTeam, lineups.second)
-                }
-                Text(
-                    "Quelle: StatsBomb Open Data · Revision ${match.sourceRevision}",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
-        },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("Schließen") } },
-    )
-}
-
-@Composable
-private fun StatsBombLineup(teamName: String, players: List<StatsBombLineupPlayer>) {
-    Text(teamName, style = MaterialTheme.typography.titleSmall)
-    players.forEach { player ->
-        val shirt = player.jerseyNumber?.let { "#$it " }.orEmpty()
-        val role = if (player.starter) "Startelf" else "Ersatz"
-        val position = player.position?.let { " · $it" }.orEmpty()
-        Text("$shirt${player.name} · $role$position", style = MaterialTheme.typography.bodySmall)
-    }
-}
-
-@Composable
 private fun FixtureCard(fixture: FixtureDisplay, onClick: () -> Unit) {
     val analysis = remember(fixture.analysisJson) {
         parsePredictionAnalysis(fixture.analysisJson)
     }
-    val odds = remember(fixture.oddsJson) { parseBettingOdds(fixture.oddsJson) }
-    val tip = remember(analysis?.scoreDistribution) {
-        analysis?.let { highestProbabilityEligibleTip(it.scoreDistribution) }
-    }
-    val valueTip = remember(analysis?.scoreDistribution, odds) {
-        analysis?.let { highestProbabilityPositiveValueTip(it.scoreDistribution, odds) }
+    val outcomePrediction = remember(
+        fixture.homeWinProbability,
+        fixture.drawProbability,
+        fixture.awayWinProbability,
+    ) {
+        if (
+            fixture.homeWinProbability != null &&
+            fixture.drawProbability != null &&
+            fixture.awayWinProbability != null
+        ) {
+            mostLikely1X2Prediction(
+                doubleArrayOf(
+                    fixture.homeWinProbability,
+                    fixture.drawProbability,
+                    fixture.awayWinProbability,
+                ),
+            )
+        } else {
+            null
+        }
     }
     val statusLabel = when {
         fixture.status == "CANCELLED" -> "Abgesagt"
@@ -1137,6 +996,13 @@ private fun FixtureCard(fixture: FixtureDisplay, onClick: () -> Unit) {
                     ProbabilitySummaryCell("X · Remis", fixture.drawProbability, Modifier.weight(1f))
                     ProbabilitySummaryCell("2 · Auswärts", fixture.awayWinProbability, Modifier.weight(1f))
                 }
+                outcomePrediction?.let {
+                    Text(
+                        "Modellprognose: ${outcomeDisplayLabel(it.selection)} " +
+                            "(${percent(it.probability)})",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
                 if (fixture.expectedHomeGoals != null && fixture.expectedAwayGoals != null) {
                     Text(
                         "Erwartete Tore (Heim : Auswärts): ${fixture.expectedHomeGoals.format(2)} : " +
@@ -1151,26 +1017,6 @@ private fun FixtureCard(fixture: FixtureDisplay, onClick: () -> Unit) {
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-            }
-            if (tip != null || valueTip != null) {
-                HorizontalDivider()
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    tip?.let {
-                        Text(
-                            "Modell-Tipp · ${it.market} · ${percent(it.probability)}",
-                            color = MaterialTheme.colorScheme.primary,
-                            style = MaterialTheme.typography.bodyMedium,
-                        )
-                    }
-                    valueTip?.let {
-                        Text(
-                            "Quoten-Tipp · ${it.market} · Quote ${it.decimalOdds.format(2)} · " +
-                                "Value +${percent(it.expectedValue)}",
-                            color = MaterialTheme.colorScheme.tertiary,
-                            style = MaterialTheme.typography.bodyMedium,
-                        )
-                    }
-                }
             }
             analysis?.let {
                 Text(
@@ -1221,49 +1067,6 @@ private fun parsePredictionAnalysis(json: String?): PredictionAnalysis? =
         null
     }
 
-private fun parseBettingOdds(json: String?): List<BettingOddsSelection> =
-    try {
-        json?.let { Gson().fromJson(it, Array<BettingOddsSelection>::class.java)?.toList() }.orEmpty()
-    } catch (exception: JsonParseException) {
-        emptyList()
-    }
-
-private fun parseLineupSummary(json: String?): List<String> {
-    if (json.isNullOrBlank()) return emptyList()
-    return try {
-        JsonParser.parseString(json).asJsonArray.flatMap { entry ->
-                val group = entry.asJsonObject
-                val team = group.getAsJsonObject("team")?.get("name")?.asString ?: "Team"
-                val formation = group.get("formation")?.takeUnless { it.isJsonNull }?.asString
-                val starters = group.getAsJsonArray("startXI")
-                    ?.mapNotNull { it.asJsonObject.getAsJsonObject("player")?.get("name")?.asString }
-                    .orEmpty()
-                buildList {
-                    add(if (formation.isNullOrBlank()) team else "$team · $formation")
-                    if (starters.isNotEmpty()) add("Startelf: ${starters.joinToString(", ")}")
-                }
-            }
-    } catch (exception: Exception) {
-        listOf("Aufstellungsdaten konnten nicht gelesen werden.")
-    }
-}
-
-private fun parseInjurySummary(json: String?): List<String> {
-    if (json.isNullOrBlank()) return emptyList()
-    return try {
-        JsonParser.parseString(json).asJsonArray.mapNotNull { entry ->
-                val injury = entry.asJsonObject
-                val player = injury.getAsJsonObject("player")?.get("name")?.asString
-                val team = injury.getAsJsonObject("team")?.get("name")?.asString
-                val reason = injury.getAsJsonObject("player")
-                    ?.get("reason")?.takeUnless { it.isJsonNull }?.asString
-                player?.let { listOfNotNull(team, it, reason).joinToString(" · ") }
-            }
-    } catch (exception: Exception) {
-        listOf("Verletzungsdaten konnten nicht gelesen werden.")
-    }
-}
-
 private data class FixtureDetailsData(
     val fixture: FixtureEntity,
     val homeTeamName: String,
@@ -1271,8 +1074,9 @@ private data class FixtureDetailsData(
     val homeHistory: List<FixtureEntity>,
     val awayHistory: List<FixtureEntity>,
     val headToHead: List<FixtureEntity>,
-    val seasonFixtures: List<FixtureEntity>,
     val teamNames: Map<Int, String>,
+    val standingsCached: Boolean,
+    val standings: List<ApiFootballStandingRow>,
 )
 
 private data class LocalStanding(
@@ -1294,14 +1098,32 @@ private fun FixtureDetailsScreen(
     var details by remember(display.providerFixtureId) { mutableStateOf<FixtureDetailsData?>(null) }
     var detailError by remember(display.providerFixtureId) { mutableStateOf<String?>(null) }
     val analysis = remember(display.analysisJson) { parsePredictionAnalysis(display.analysisJson) }
-    val odds = remember(display.oddsJson) { parseBettingOdds(display.oddsJson) }
-    val modelTip = remember(analysis?.scoreDistribution) {
-        analysis?.let { highestProbabilityEligibleTip(it.scoreDistribution) }
-    }
-    val valueTip = remember(analysis?.scoreDistribution, odds) {
-        analysis?.let { highestProbabilityPositiveValueTip(it.scoreDistribution, odds) }
-    }
     val analysisInvalid = display.analysisJson != null && analysis == null
+    val outcomePrediction = remember(
+        display.homeWinProbability,
+        display.drawProbability,
+        display.awayWinProbability,
+        analysis?.mostLikelyOutcome,
+        analysis?.mostLikelyOutcomeProbability,
+    ) {
+        if (
+            display.homeWinProbability != null &&
+            display.drawProbability != null &&
+            display.awayWinProbability != null
+        ) {
+            mostLikely1X2Prediction(
+                doubleArrayOf(
+                    display.homeWinProbability,
+                    display.drawProbability,
+                    display.awayWinProbability,
+                ),
+            )
+        } else {
+            val outcome = analysis?.mostLikelyOutcome
+            val probability = analysis?.mostLikelyOutcomeProbability
+            if (outcome != null && probability != null) OutcomePrediction(outcome, probability) else null
+        }
+    }
 
     LaunchedEffect(display.providerFixtureId) {
         try {
@@ -1313,18 +1135,24 @@ private fun FixtureDetailsScreen(
                 val awayId = match.awayTeamId
                     ?: error("Die Auswärtsmannschaft ist noch nicht zugeordnet.")
                 val teams = dao.allTeams().associate { it.providerTeamId to it.name }
+                val standingsCache = dao.apiFootballStandings(match.seasonId)
+                val standings = standingsCache?.let { cache ->
+                    runCatching {
+                        Gson().fromJson(cache.rowsJson, Array<ApiFootballStandingRow>::class.java)
+                            ?.toList()
+                            .orEmpty()
+                    }.getOrDefault(emptyList())
+                }.orEmpty()
                 FixtureDetailsData(
                     fixture = match,
                     homeTeamName = teams[homeId] ?: display.homeTeamName ?: "Heimteam",
                     awayTeamName = teams[awayId] ?: display.awayTeamName ?: "Auswärtsteam",
                     homeHistory = dao.teamHistory(
-                        match.competitionCode,
                         homeId,
                         match.matchDate,
                         DETAIL_HISTORY_LIMIT,
                     ),
                     awayHistory = dao.teamHistory(
-                        match.competitionCode,
                         awayId,
                         match.matchDate,
                         DETAIL_HISTORY_LIMIT,
@@ -1336,8 +1164,9 @@ private fun FixtureDetailsScreen(
                         match.matchDate,
                         DETAIL_HISTORY_LIMIT,
                     ),
-                    seasonFixtures = dao.fixturesForSeason(match.seasonId),
                     teamNames = teams,
+                    standingsCached = standingsCache != null,
+                    standings = standings,
                 )
             }
         } catch (exception: Exception) {
@@ -1346,8 +1175,6 @@ private fun FixtureDetailsScreen(
         }
     }
 
-    val lineupSummary = remember(display.lineupsJson) { parseLineupSummary(display.lineupsJson) }
-    val injurySummary = remember(display.injuriesJson) { parseInjurySummary(display.injuriesJson) }
 
     Column(
         modifier = Modifier.fillMaxWidth(),
@@ -1422,25 +1249,13 @@ private fun FixtureDetailsScreen(
                 )
                 Text("Wahrscheinlichstes Ergebnis: ${analysis.mostLikelyScore}")
                 Text("Modell: ${LocalForecastingState.MODEL_VERSION}", style = MaterialTheme.typography.bodySmall)
-                modelTip?.let {
+                outcomePrediction?.let {
                     Text(
-                        "Wahrscheinlichster Markt: ${it.market} · ${percent(it.probability)}",
+                        "1X2-Modellprognose: ${outcomeDisplayLabel(it.selection)} " +
+                            "(${percent(it.probability)}).",
                         color = MaterialTheme.colorScheme.primary,
                     )
-                } ?: Text("Kein Tipp in den berücksichtigten Märkten.")
-                valueTip?.let {
-                    Text(
-                        "Quoten-Tipp: ${it.market} · Quote ${it.decimalOdds.format(2)} · " +
-                            "Modell-Value +${percent(it.expectedValue)} · ${it.bookmaker}",
-                        color = MaterialTheme.colorScheme.tertiary,
-                    )
-                } ?: Text(
-                    if (odds.isEmpty()) {
-                        "Keine passenden Quoten gespeichert."
-                    } else {
-                        "Keine Quote ab 1,50 mit positivem modelliertem Erwartungswert."
-                    },
-                )
+                }
             }
         }
 
@@ -1487,8 +1302,43 @@ private fun FixtureDetailsScreen(
 
         details?.let { data ->
             DetailSection("Form und direkte Duelle") {
-                Text("${data.homeTeamName}: ${formatRecentForm(data.homeHistory, data.fixture.homeTeamId)}")
-                Text("${data.awayTeamName}: ${formatRecentForm(data.awayHistory, data.fixture.awayTeamId)}")
+                val homeMatches = data.fixture.homeTeamId?.let {
+                    localTeamMatchSummaries(data.homeHistory, it, DETAIL_HISTORY_LIMIT)
+                }.orEmpty()
+                val awayMatches = data.fixture.awayTeamId?.let {
+                    localTeamMatchSummaries(data.awayHistory, it, DETAIL_HISTORY_LIMIT)
+                }.orEmpty()
+                val homeApiForm = data.standings.firstOrNull {
+                    it.teamId == data.fixture.homeTeamId
+                }?.form?.let(::apiFootballFormLabel)
+                val awayApiForm = data.standings.firstOrNull {
+                    it.teamId == data.fixture.awayTeamId
+                }?.form?.let(::apiFootballFormLabel)
+                val homeLocalForm = localTeamFormLabel(homeMatches)
+                val awayLocalForm = localTeamFormLabel(awayMatches)
+                Text("${data.homeTeamName}: ${homeLocalForm ?: homeApiForm ?: "Form derzeit nicht verfügbar"}")
+                Text("${data.awayTeamName}: ${awayLocalForm ?: awayApiForm ?: "Form derzeit nicht verfügbar"}")
+                if ((homeLocalForm == null && homeApiForm != null) ||
+                    (awayLocalForm == null && awayApiForm != null)
+                ) {
+                    Text("API-Football-Saisonform als Fallback (Sieg/Remis/Niederlage).")
+                }
+                Text("Letzte Spiele ${data.homeTeamName}", style = MaterialTheme.typography.labelLarge)
+                if (homeMatches.isEmpty()) {
+                    Text("Keine abgeschlossenen Spiele in der lokalen Datenbank.")
+                } else {
+                    homeMatches.forEach { match ->
+                        Text(localTeamMatchDisplay(match, data.teamNames[match.opponentTeamId]))
+                    }
+                }
+                Text("Letzte Spiele ${data.awayTeamName}", style = MaterialTheme.typography.labelLarge)
+                if (awayMatches.isEmpty()) {
+                    Text("Keine abgeschlossenen Spiele in der lokalen Datenbank.")
+                } else {
+                    awayMatches.forEach { match ->
+                        Text(localTeamMatchDisplay(match, data.teamNames[match.opponentTeamId]))
+                    }
+                }
                 HorizontalDivider()
                 Text("Direkte Duelle", style = MaterialTheme.typography.labelLarge)
                 if (data.headToHead.isEmpty()) {
@@ -1504,19 +1354,28 @@ private fun FixtureDetailsScreen(
                 }
             }
             DetailSection("Saison-Tabelle") {
-                val standings = calculateStandings(data.seasonFixtures)
-                listOf(data.fixture.homeTeamId, data.fixture.awayTeamId)
-                    .filterNotNull()
-                    .distinct()
-                    .forEach { teamId ->
-                        val rank = standings.indexOfFirst { it.teamId == teamId } + 1
-                        standings.getOrNull(rank - 1)?.let { row ->
-                            Text(
-                                "$rank. ${data.teamNames[teamId] ?: "Team"} · ${row.points} Pkt. · " +
-                                    "${row.played} Spiele · ${row.goalsFor}:${row.goalsAgainst} Tore",
-                            )
-                        } ?: Text("${data.teamNames[teamId] ?: "Team"}: noch keine Saisonwerte.")
-                    }
+                when {
+                    !data.standingsCached ->
+                        Text("API-Football-Saisonwerte sind noch nicht synchronisiert.")
+                    data.standings.isEmpty() ->
+                        Text("API-Football stellt für diesen Wettbewerb oder diese Saison keine Tabelle bereit.")
+                    else -> listOfNotNull(data.fixture.homeTeamId, data.fixture.awayTeamId)
+                        .distinct()
+                        .forEach { teamId ->
+                            val row = data.standings.firstOrNull { it.teamId == teamId }
+                            if (row == null) {
+                                Text("${data.teamNames[teamId] ?: "Team"} ist in der API-Tabelle nicht enthalten.")
+                            } else {
+                                Text(
+                                    "${row.rank?.let { "$it. " }.orEmpty()}${row.teamName}" +
+                                        "${row.group?.let { " · $it" }.orEmpty()} · " +
+                                        "${row.points?.let { "$it Pkt." } ?: "Punkte —"} · " +
+                                        "${row.played?.let { "$it Spiele" } ?: "Spiele —"} · " +
+                                        "${row.goalsFor ?: "—"}:${row.goalsAgainst ?: "—"} Tore",
+                                )
+                            }
+                        }
+                }
             }
         } ?: if (detailError == null) {
             Card(modifier = Modifier.fillMaxWidth()) {
@@ -1526,46 +1385,13 @@ private fun FixtureDetailsScreen(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     CircularProgressIndicator(modifier = Modifier.width(24.dp), strokeWidth = 2.dp)
-                    Text("Lokale Teamform und Saisondaten werden geladen …")
+                    Text("Spieldetails und gespeicherte API-Football-Form werden geladen …")
                 }
             }
         } else {
             Unit
         }
 
-        DetailSection("Zusatzdaten") {
-            Text("Quelle: API-Football")
-            Text(
-                "xG Heim/Auswärts: ${display.homeXg?.format(2) ?: "—"} / " +
-                    "${display.awayXg?.format(2) ?: "—"}",
-            )
-            Text(
-                "Schüsse: ${display.homeShots?.toString() ?: "—"} / " +
-                    "${display.awayShots?.toString() ?: "—"}",
-            )
-            Text(
-                "Ballbesitz: ${display.homePossession?.format(1)?.plus("%") ?: "—"} / " +
-                    "${display.awayPossession?.format(1)?.plus("%") ?: "—"}",
-            )
-            Text("Aufstellungen", style = MaterialTheme.typography.labelLarge)
-            if (lineupSummary.isEmpty()) {
-                Text("Keine Aufstellungsdaten gespeichert.")
-            } else {
-                lineupSummary.forEach { Text(it, style = MaterialTheme.typography.bodySmall) }
-            }
-            Text("Verletzungen", style = MaterialTheme.typography.labelLarge)
-            if (injurySummary.isEmpty()) {
-                Text("Keine Verletzungsdaten gespeichert.")
-            } else {
-                injurySummary.forEach { Text(it, style = MaterialTheme.typography.bodySmall) }
-            }
-            Text(
-                "Karten werden für diese Zusatzquelle nicht zuverlässig geliefert. Fehlende Werte werden " +
-                    "nicht geschätzt; historische StatsBomb-Daten sind separat.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
     }
 }
 
@@ -1718,8 +1544,10 @@ private fun PerformanceScreen(database: SportPrediDatabase) {
             "Chronologischer Walk-forward-Vergleich lokaler Modelle. Alle Spiele eines Datums werden " +
                 "prognostiziert, bevor Ergebnisse dieses Tages einfließen. Halbwertszeit (180/365/730 Tage) " +
                 "und ρ werden auf der Validierung anhand der Accuracy ausgewählt; der spätere Testzeitraum " +
-                "bleibt für diese Auswahl unangetastet. Bei weniger als 100 Validierungsprognosen gelten " +
-                "die Standardwerte.",
+                "bleibt für diese Auswahl unangetastet. Die Holdout-1X2-Trefferquote zählt die " +
+                "wahrscheinlichste Klasse über alle Testspiele, nicht nur ausgewählte Tipps. 90 % ist ein " +
+                "Zielwert; angezeigt wird der gemessene Wert und die tatsächliche Änderung gegenüber dem " +
+                "alten Modell. Bei weniger als 100 Validierungsprognosen gelten die Standardwerte.",
         )
         Button(onClick = { loadOrRun(startNewRun = true) }, enabled = !loading) {
             Text("Backtest lokal starten")
@@ -1745,6 +1573,30 @@ private fun PerformanceScreen(database: SportPrediDatabase) {
                     "Halbwertszeit=${result.selectedHalfLifeDays.format(0)} Tage · " +
                         "ρ=${result.selectedDixonColesRho.format(2)}",
             )
+            Text("Holdout-Vergleich zur alten Baseline ($OLD_BACKTEST_BASELINE_MODEL_VERSION)")
+            if (result.holdoutComparisons.isEmpty()) {
+                Text("Kein unabhängiger Holdout-Vergleich verfügbar.")
+            } else {
+                result.holdoutComparisons.forEach { comparison ->
+                    val change = comparison.improvement?.let {
+                        val sign = if (it > 0.0) "+" else ""
+                        "$sign${(it * 100).format(1)} Prozentpunkte"
+                    } ?: "nicht direkt vergleichbar"
+                    val targetStatus = when {
+                        comparison.meetsAccuracyGoal -> "90%-Benchmark im Holdout erreicht."
+                        comparison.candidateSamples < MIN_HOLDOUT_SAMPLES_FOR_GOAL ->
+                            "90%-Benchmark nicht belegt (zu wenige Holdout-Spiele)."
+                        else -> "90%-Benchmark im Holdout nicht erreicht."
+                    }
+                    Text(
+                        "${comparison.candidateModelVersion} · n=${comparison.candidateSamples} " +
+                            "gegen Baseline n=${comparison.baselineSamples} · " +
+                            "Trefferquote ${comparison.candidateAccuracy?.let(::percent) ?: "n/a"} " +
+                            "gegen ${comparison.baselineAccuracy?.let(::percent) ?: "n/a"} · " +
+                            "Änderung $change · $targetStatus",
+                    )
+                }
+            }
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 result.models.groupBy { it.scope }.forEach { (scope, metrics) ->
                     Text(scopeLabel(scope), style = MaterialTheme.typography.titleMedium)
@@ -1756,7 +1608,7 @@ private fun PerformanceScreen(database: SportPrediDatabase) {
                             ) {
                                 Text(model.modelVersion, style = MaterialTheme.typography.titleSmall)
                                 Text("Stichprobe: ${model.sampleSize}")
-                                Text("Accuracy: ${model.accuracy?.let(::percent) ?: "n/a"}")
+                                Text("1X2-Trefferquote: ${model.accuracy?.let(::percent) ?: "n/a"}")
                                 Text("Log Loss: ${model.logLoss?.format(4) ?: "n/a"}")
                                 Text("Brier Score: ${model.brierScore?.format(4) ?: "n/a"}")
                                 Text("Kalibrierungsfehler (ECE): ${model.calibrationError?.let { it.format(4) } ?: "n/a"}")
@@ -1773,8 +1625,8 @@ private fun PerformanceScreen(database: SportPrediDatabase) {
 private fun scopeLabel(scope: String): String = when (scope) {
     "train" -> "Training"
     "validation" -> "Validierung"
-    "test" -> "Unabhängiger Test"
-    else -> "Gesamter Zeitraum"
+    "test" -> "Chronologischer Holdout (Test)"
+    else -> "Gesamter Zeitraum (deskriptiv)"
 }
 
 private fun Double.format(digits: Int): String = "%.${digits}f".format(this)
@@ -1783,6 +1635,11 @@ private fun percent(value: Double): String = "${(value * 100).format(1)}%"
 
 private fun coveragePercent(part: Int, total: Int): String =
     if (total == 0) "—" else percent(part.toDouble() / total)
+
+private fun missingTargetSummary(report: LocalSyncReport): String =
+    report.missingTargetCompetitions.takeIf { it.isNotEmpty() }
+        ?.joinToString(prefix = " · Im API-Katalog nicht geliefert: ", separator = ", ")
+        .orEmpty()
 
 private fun formatTimestamp(value: String?): String {
     if (value.isNullOrBlank()) return "Noch keine Synchronisierung"

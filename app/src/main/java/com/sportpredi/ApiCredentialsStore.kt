@@ -11,7 +11,6 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 data class ApiCredentials(
-    val oddsApiKey: String,
     val apiFootballKey: String,
 )
 
@@ -22,14 +21,12 @@ class ApiCredentialsStore(context: Context) {
     )
 
     fun load(): ApiCredentials = ApiCredentials(
-        oddsApiKey = preferences.getString(ODDS_API_KEY, null)?.let(::decrypt)?.trim().orEmpty(),
         apiFootballKey = preferences.getString(API_FOOTBALL_KEY, null)?.let(::decrypt)?.trim().orEmpty(),
     )
 
-    fun save(credentials: ApiCredentials) {
+    fun saveApiFootballKey(value: String) {
         preferences.edit().apply {
-            putEncrypted(ODDS_API_KEY, credentials.oddsApiKey.trim())
-            putEncrypted(API_FOOTBALL_KEY, credentials.apiFootballKey.trim())
+            putEncrypted(API_FOOTBALL_KEY, value.trim())
         }.apply()
     }
 
@@ -80,7 +77,6 @@ class ApiCredentialsStore(context: Context) {
 
     private companion object {
         const val PREFERENCES_NAME = "encrypted_api_credentials"
-        const val ODDS_API_KEY = "odds_api_key"
         const val API_FOOTBALL_KEY = "api_football_key"
         const val KEY_ALIAS = "sportpredi.api.credentials"
         const val ANDROID_KEYSTORE = "AndroidKeyStore"

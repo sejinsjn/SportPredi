@@ -66,6 +66,88 @@ class LocalForecastingModelTest {
     }
 
     @Test
+    fun matchesFromOtherCompetitionsContributeToTeamFormAndPrediction() {
+        val baseline = LocalForecastingState()
+            .forecast(
+                fixture(
+                    providerId = 100,
+                    date = "2025-01-02",
+                    homeId = 1,
+                    awayId = 2,
+                    competitionCode = "cup",
+                ),
+            )
+        val state = LocalForecastingState()
+        state.addCompletedMatch(
+            fixture(
+                providerId = 1,
+                date = "2025-01-01",
+                homeId = 1,
+                awayId = 2,
+                homeScore = 4,
+                awayScore = 0,
+                competitionCode = "league",
+            ),
+        )
+
+        val forecast = state.forecast(
+            fixture(
+                providerId = 100,
+                date = "2025-01-02",
+                homeId = 1,
+                awayId = 2,
+                competitionCode = "cup",
+            ),
+        )
+
+        assertEquals(1, forecast.analysis.homeHistoryCount)
+        assertEquals(1, forecast.analysis.awayHistoryCount)
+        assertTrue(forecast.analysis.homeElo > baseline.analysis.homeElo)
+        assertTrue(
+            forecast.dixonColesModel.expectedHomeGoals >
+                baseline.dixonColesModel.expectedHomeGoals,
+        )
+        assertTrue(
+            forecast.empiricalBaseline.expectedHomeGoals >
+                baseline.empiricalBaseline.expectedHomeGoals,
+        )
+        assertTrue(
+            forecast.analysis.estimatedHomeAdvantageElo >
+                baseline.analysis.estimatedHomeAdvantageElo,
+        )
+        assertFalse(forecast.inputFingerprint == baseline.inputFingerprint)
+    }
+
+    @Test
+    fun oldResultsLoseInfluenceAndDoNotKeepConfidenceHigh() {
+        val state = LocalForecastingState(LocalForecastParameters(halfLifeDays = 1.0))
+        state.addCompletedMatch(
+            fixture(
+                providerId = 1,
+                date = "2025-01-01",
+                homeId = 1,
+                awayId = 2,
+                homeScore = 4,
+                awayScore = 0,
+                competitionCode = "league",
+            ),
+        )
+        val recent = state.forecast(
+            fixture(100, "2025-01-02", homeId = 1, awayId = 2, competitionCode = "cup"),
+        )
+        val stale = state.forecast(
+            fixture(101, "2025-01-11", homeId = 1, awayId = 2, competitionCode = "cup"),
+        )
+
+        assertEquals(1, stale.analysis.homeHistoryCount)
+        assertEquals("Sehr begrenzte Datenbasis", stale.analysis.confidenceLabel)
+        assertTrue(
+            kotlin.math.abs(stale.analysis.homeElo - 1500.0) <
+                kotlin.math.abs(recent.analysis.homeElo - 1500.0),
+        )
+    }
+
+    @Test
     fun estimatedHomeAdvantageRespondsToObservedHomeResults() {
         val state = LocalForecastingState()
         val before = state.forecast(fixture(1, "2025-01-01", homeId = 1, awayId = 2))
@@ -101,6 +183,12 @@ class LocalForecastingModelTest {
 
         assertEquals(analysis.mostLikelyScore, restored.mostLikelyScore)
         assertEquals(analysis.over25Probability, restored.over25Probability, 1e-12)
+        assertEquals(analysis.mostLikelyOutcome, restored.mostLikelyOutcome)
+        assertEquals(
+            analysis.mostLikelyOutcomeProbability!!,
+            restored.mostLikelyOutcomeProbability!!,
+            1e-12,
+        )
         assertEquals(
             analysis.scoreDistribution.size,
             restored.scoreDistribution.size,
@@ -117,18 +205,18 @@ class LocalForecastingModelTest {
     }
 
     @Test
-    fun sparseHistoryStillProducesAnExplicitlyLowConfidenceTip() {
+    fun sparseHistoryStillProducesAnUnfilteredOutcomePrediction() {
         val analysis = LocalForecastingState()
             .forecast(fixture(100, "2025-02-01", homeId = 1, awayId = 2))
             .analysis
-        val tip = highestProbabilityEligibleTip(analysis.scoreDistribution)
-            ?: throw AssertionError("A score distribution should produce a model tip.")
 
         assertEquals("Sehr begrenzte Datenbasis", analysis.confidenceLabel)
         assertEquals(0, analysis.homeHistoryCount)
         assertEquals(0, analysis.awayHistoryCount)
         assertEquals(1.0, analysis.scoreDistribution.sumOf { it.probability }, 1e-12)
-        assertTrue(tip.probability in 0.0..1.0)
+        assertTrue(analysis.mostLikelyOutcome in setOf("HOME", "DRAW", "AWAY"))
+        assertTrue(analysis.mostLikelyOutcomeProbability != null)
+        assertTrue(analysis.mostLikelyOutcomeProbability!! < MODEL_ACCURACY_GOAL)
     }
 
     private fun trainedState(): LocalForecastingState {
@@ -155,9 +243,10 @@ class LocalForecastingModelTest {
         awayId: Int,
         homeScore: Int? = null,
         awayScore: Int? = null,
+        competitionCode: String = "test-league",
     ) = FixtureEntity(
         providerFixtureId = providerId,
-        competitionCode = "test-league",
+        competitionCode = competitionCode,
         seasonId = "test-season",
         homeTeamId = homeId,
         awayTeamId = awayId,

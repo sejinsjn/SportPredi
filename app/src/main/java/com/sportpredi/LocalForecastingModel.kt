@@ -42,6 +42,8 @@ data class PredictionAnalysis(
     val confidenceLabel: String,
     val latestSourceUpdate: String?,
     val explanation: String,
+    val mostLikelyOutcome: String? = null,
+    val mostLikelyOutcomeProbability: Double? = null,
 )
 
 data class ModelPrediction(
@@ -73,6 +75,10 @@ private class TeamForecastState {
     var awayWeight = 0.0
     var awayGoalsFor = 0.0
     var awayGoalsAgainst = 0.0
+    var allMatchesWeight = 0.0
+    var allGoalsFor = 0.0
+    var allGoalsAgainst = 0.0
+    var effectiveHistoryWeight = 0.0
     var matchCount = 0
     var rating = INITIAL_ELO
     var lastMatchDate: LocalDate? = null
@@ -85,6 +91,11 @@ private class TeamForecastState {
         awayWeight *= factor
         awayGoalsFor *= factor
         awayGoalsAgainst *= factor
+        allMatchesWeight *= factor
+        allGoalsFor *= factor
+        allGoalsAgainst *= factor
+        effectiveHistoryWeight *= factor
+        rating = INITIAL_ELO + (rating - INITIAL_ELO) * factor
     }
 
     companion object {
@@ -92,20 +103,51 @@ private class TeamForecastState {
     }
 }
 
+private class CompetitionForecastState {
+    var matchWeight = 0.0
+    var homeGoals = 0.0
+    var awayGoals = 0.0
+    var homePoints = 0.0
+    var homeWins = 0.0
+    var awayWins = 0.0
+    var draws = 0.0
+
+    fun addMatch(homeScore: Int, awayScore: Int) {
+        matchWeight += 1.0
+        homeGoals += homeScore
+        awayGoals += awayScore
+        when {
+            homeScore > awayScore -> {
+                homePoints += 1.0
+                homeWins += 1.0
+            }
+            homeScore == awayScore -> {
+                homePoints += 0.5
+                draws += 1.0
+            }
+            else -> awayWins += 1.0
+        }
+    }
+
+    fun decay(factor: Double) {
+        matchWeight *= factor
+        homeGoals *= factor
+        awayGoals *= factor
+        homePoints *= factor
+        homeWins *= factor
+        awayWins *= factor
+        draws *= factor
+    }
+}
+
 class LocalForecastingState(
     private val parameters: LocalForecastParameters = LocalForecastParameters(),
 ) {
     private val teams = mutableMapOf<Int, TeamForecastState>()
+    private val competitions = mutableMapOf<String, CompetitionForecastState>()
+    private val allCompetitions = CompetitionForecastState()
     private var currentDate: LocalDate? = null
     private var lastCompletedMatchDate: LocalDate? = null
-    private var seasonId: String? = null
-    private var leagueMatchWeight = 0.0
-    private var leagueHomeGoals = 0.0
-    private var leagueAwayGoals = 0.0
-    private var leagueHomePoints = 0.0
-    private var leagueHomeWins = 0.0
-    private var leagueAwayWins = 0.0
-    private var leagueDraws = 0.0
     private var sourceUpdate: String? = null
     private var historyRevision = "empty"
 
@@ -118,13 +160,8 @@ class LocalForecastingState(
             val elapsedDays = ChronoUnit.DAYS.between(priorDate, date).coerceAtLeast(0)
             val decay = exp(-ln(2.0) * elapsedDays / parameters.halfLifeDays.coerceAtLeast(1.0))
             teams.values.forEach { it.decay(decay) }
-            leagueMatchWeight *= decay
-            leagueHomeGoals *= decay
-            leagueAwayGoals *= decay
-            leagueHomePoints *= decay
-            leagueHomeWins *= decay
-            leagueAwayWins *= decay
-            leagueDraws *= decay
+            competitions.values.forEach { it.decay(decay) }
+            allCompetitions.decay(decay)
         }
         currentDate = date
     }
@@ -139,31 +176,59 @@ class LocalForecastingState(
         val awayId = fixture.awayTeamId ?: error("Away team is missing.")
         val home = teams[homeId] ?: TeamForecastState()
         val away = teams[awayId] ?: TeamForecastState()
+        val competition = competitions[fixture.competitionCode] ?: CompetitionForecastState()
+        val allCompetitionHomeAverage = (
+            allCompetitions.homeGoals + DEFAULT_HOME_GOALS * LEAGUE_PRIOR_WEIGHT
+            ) / (allCompetitions.matchWeight + LEAGUE_PRIOR_WEIGHT)
+        val allCompetitionAwayAverage = (
+            allCompetitions.awayGoals + DEFAULT_AWAY_GOALS * LEAGUE_PRIOR_WEIGHT
+            ) / (allCompetitions.matchWeight + LEAGUE_PRIOR_WEIGHT)
         val leagueHomeAverage = (
-            leagueHomeGoals + DEFAULT_HOME_GOALS * LEAGUE_PRIOR_WEIGHT
-            ) / (leagueMatchWeight + LEAGUE_PRIOR_WEIGHT)
+            competition.homeGoals + allCompetitionHomeAverage * COMPETITION_PRIOR_WEIGHT
+            ) / (competition.matchWeight + COMPETITION_PRIOR_WEIGHT)
         val leagueAwayAverage = (
-            leagueAwayGoals + DEFAULT_AWAY_GOALS * LEAGUE_PRIOR_WEIGHT
-            ) / (leagueMatchWeight + LEAGUE_PRIOR_WEIGHT)
+            competition.awayGoals + allCompetitionAwayAverage * COMPETITION_PRIOR_WEIGHT
+            ) / (competition.matchWeight + COMPETITION_PRIOR_WEIGHT)
+        val teamAverageGoals = (leagueHomeAverage + leagueAwayAverage) / 2.0
+        val homeOverallAttack = relativeRate(
+            home.allGoalsFor,
+            home.allMatchesWeight,
+            teamAverageGoals,
+        )
+        val homeOverallDefence = relativeRate(
+            home.allGoalsAgainst,
+            home.allMatchesWeight,
+            teamAverageGoals,
+        )
+        val awayOverallAttack = relativeRate(
+            away.allGoalsFor,
+            away.allMatchesWeight,
+            teamAverageGoals,
+        )
+        val awayOverallDefence = relativeRate(
+            away.allGoalsAgainst,
+            away.allMatchesWeight,
+            teamAverageGoals,
+        )
         val homeAttack = relativeRate(
             home.homeGoalsFor,
             home.homeWeight,
-            leagueHomeAverage,
+            teamAverageGoals * homeOverallAttack,
         )
         val homeDefence = relativeRate(
             home.homeGoalsAgainst,
             home.homeWeight,
-            leagueAwayAverage,
+            teamAverageGoals * homeOverallDefence,
         )
         val awayAttack = relativeRate(
             away.awayGoalsFor,
             away.awayWeight,
-            leagueAwayAverage,
+            teamAverageGoals * awayOverallAttack,
         )
         val awayDefence = relativeRate(
             away.awayGoalsAgainst,
             away.awayWeight,
-            leagueHomeAverage,
+            teamAverageGoals * awayOverallDefence,
         )
         val expectedHome = (
             leagueHomeAverage * homeAttack * awayDefence
@@ -171,10 +236,13 @@ class LocalForecastingState(
         val expectedAway = (
             leagueAwayAverage * awayAttack * homeDefence
             ).coerceIn(MIN_EXPECTED_GOALS, MAX_EXPECTED_GOALS)
-        val homeAdvantage = estimatedHomeAdvantage()
+        val homeAdvantage = estimatedHomeAdvantage(competition)
+        val allCompetitionDrawRate = (
+            allCompetitions.draws + DEFAULT_DRAW_RATE * LEAGUE_PRIOR_WEIGHT
+            ) / (allCompetitions.matchWeight + LEAGUE_PRIOR_WEIGHT)
         val drawProbability = (
-            (leagueDraws + DEFAULT_DRAW_RATE * LEAGUE_PRIOR_WEIGHT) /
-                (leagueMatchWeight + LEAGUE_PRIOR_WEIGHT)
+            (competition.draws + allCompetitionDrawRate * COMPETITION_PRIOR_WEIGHT) /
+                (competition.matchWeight + COMPETITION_PRIOR_WEIGHT)
             ).coerceIn(MIN_DRAW_RATE, MAX_DRAW_RATE)
         val homeRating = home.rating
         val awayRating = away.rating
@@ -186,10 +254,15 @@ class LocalForecastingState(
             drawProbability,
             1.0 - drawProbability - eloWinProbability,
         )
+        val allCompetitionEmpirical = doubleArrayOf(
+            allCompetitions.homeWins + DEFAULT_HOME_WIN_RATE * LEAGUE_PRIOR_WEIGHT,
+            allCompetitions.draws + DEFAULT_DRAW_RATE * LEAGUE_PRIOR_WEIGHT,
+            allCompetitions.awayWins + DEFAULT_AWAY_WIN_RATE * LEAGUE_PRIOR_WEIGHT,
+        ).let(::normalize)
         val empirical = doubleArrayOf(
-            (leagueHomeWins + DEFAULT_HOME_WIN_RATE * LEAGUE_PRIOR_WEIGHT).coerceAtLeast(0.0),
-            (leagueDraws + DEFAULT_DRAW_RATE * LEAGUE_PRIOR_WEIGHT).coerceAtLeast(0.0),
-            (leagueAwayWins + DEFAULT_AWAY_WIN_RATE * LEAGUE_PRIOR_WEIGHT).coerceAtLeast(0.0),
+            competition.homeWins + allCompetitionEmpirical[0] * COMPETITION_PRIOR_WEIGHT,
+            competition.draws + allCompetitionEmpirical[1] * COMPETITION_PRIOR_WEIGHT,
+            competition.awayWins + allCompetitionEmpirical[2] * COMPETITION_PRIOR_WEIGHT,
         ).let(::normalize)
         val independent = scoreDistribution(expectedHome, expectedAway, rho = 0.0)
         val corrected = scoreDistribution(expectedHome, expectedAway, parameters.dixonColesRho)
@@ -214,12 +287,13 @@ class LocalForecastingState(
         val homeWin = corrected.filter { it.homeGoals > it.awayGoals }.sumOf { it.probability }
         val draw = corrected.filter { it.homeGoals == it.awayGoals }.sumOf { it.probability }
         val awayWin = corrected.filter { it.homeGoals < it.awayGoals }.sumOf { it.probability }
+        val mostLikelyOutcome = mostLikely1X2Prediction(doubleArrayOf(homeWin, draw, awayWin))
         val homeCount = home.matchCount
         val awayCount = away.matchCount
-        val minCount = minOf(homeCount, awayCount)
+        val minEffectiveHistory = minOf(home.effectiveHistoryWeight, away.effectiveHistoryWeight)
         val confidence = when {
-            minCount < MINIMUM_HISTORY_MATCHES -> "Sehr begrenzte Datenbasis"
-            minCount < 10 -> "Begrenzte Datenbasis"
+            minEffectiveHistory < MINIMUM_HISTORY_MATCHES -> "Sehr begrenzte Datenbasis"
+            minEffectiveHistory < 10.0 -> "Begrenzte Datenbasis"
             else -> "Historische Datenbasis: mindestens 10 Spiele je Team"
         }
         val restDaysHome = home.lastMatchDate?.let { ChronoUnit.DAYS.between(it, date) }
@@ -249,6 +323,8 @@ class LocalForecastingState(
             confidenceLabel = confidence,
             latestSourceUpdate = sourceUpdate,
             explanation = MODEL_EXPLANATION,
+            mostLikelyOutcome = mostLikelyOutcome?.selection,
+            mostLikelyOutcomeProbability = mostLikelyOutcome?.probability,
         )
         return LocalForecastResult(
             analysis = analysis,
@@ -293,26 +369,29 @@ class LocalForecastingState(
         }
         val date = LocalDate.parse(fixture.matchDate)
         advanceTo(date)
-        if (seasonId != null && seasonId != fixture.seasonId) {
-            teams.values.forEach {
-                it.rating = TeamForecastState.INITIAL_ELO +
-                    (it.rating - TeamForecastState.INITIAL_ELO) * SEASON_RATING_RETENTION
-            }
-        }
-        seasonId = fixture.seasonId
         val homeId = fixture.homeTeamId
         val awayId = fixture.awayTeamId
         val home = teams.getOrPut(homeId) { TeamForecastState() }
         val away = teams.getOrPut(awayId) { TeamForecastState() }
+        val competition = competitions.getOrPut(fixture.competitionCode) { CompetitionForecastState() }
         val homeGoals = fixture.homeScore
         val awayGoals = fixture.awayScore
+        val homeExpected = eloExpected(home.rating, away.rating, estimatedHomeAdvantage(competition))
         val weight = 1.0
         home.homeWeight += weight
         home.homeGoalsFor += homeGoals * weight
         home.homeGoalsAgainst += awayGoals * weight
+        home.allMatchesWeight += weight
+        home.allGoalsFor += homeGoals * weight
+        home.allGoalsAgainst += awayGoals * weight
+        home.effectiveHistoryWeight += weight
         away.awayWeight += weight
         away.awayGoalsFor += awayGoals * weight
         away.awayGoalsAgainst += homeGoals * weight
+        away.allMatchesWeight += weight
+        away.allGoalsFor += awayGoals * weight
+        away.allGoalsAgainst += homeGoals * weight
+        away.effectiveHistoryWeight += weight
         home.matchCount += 1
         away.matchCount += 1
         home.lastMatchDate = date
@@ -322,22 +401,13 @@ class LocalForecastingState(
         while (home.recent.size > RECENT_MATCH_LIMIT) home.recent.removeFirst()
         while (away.recent.size > RECENT_MATCH_LIMIT) away.recent.removeFirst()
 
-        leagueMatchWeight += weight
-        leagueHomeGoals += homeGoals * weight
-        leagueAwayGoals += awayGoals * weight
         val actualHomePoints = when {
             homeGoals > awayGoals -> 1.0
             homeGoals == awayGoals -> 0.5
             else -> 0.0
         }
-        leagueHomePoints += actualHomePoints * weight
-        when {
-            homeGoals > awayGoals -> leagueHomeWins += weight
-            homeGoals == awayGoals -> leagueDraws += weight
-            else -> leagueAwayWins += weight
-        }
-
-        val homeExpected = eloExpected(home.rating, away.rating, estimatedHomeAdvantage())
+        competition.addMatch(homeGoals, awayGoals)
+        allCompetitions.addMatch(homeGoals, awayGoals)
         val ratingChange = ELO_K_FACTOR * (actualHomePoints - homeExpected)
         home.rating += ratingChange
         away.rating -= ratingChange
@@ -353,15 +423,17 @@ class LocalForecastingState(
     fun hasMinimumHistory(fixture: FixtureEntity): Boolean {
         val homeId = fixture.homeTeamId ?: return false
         val awayId = fixture.awayTeamId ?: return false
-        return (teams[homeId]?.matchCount ?: 0) >= MINIMUM_HISTORY_MATCHES &&
-            (teams[awayId]?.matchCount ?: 0) >= MINIMUM_HISTORY_MATCHES
+        return (teams[homeId]?.effectiveHistoryWeight ?: 0.0) >= MINIMUM_HISTORY_MATCHES &&
+            (teams[awayId]?.effectiveHistoryWeight ?: 0.0) >= MINIMUM_HISTORY_MATCHES
     }
 
-    private fun estimatedHomeAdvantage(): Double {
-        val priorPoints = DEFAULT_HOME_POINTS * LEAGUE_PRIOR_WEIGHT
+    private fun estimatedHomeAdvantage(competition: CompetitionForecastState): Double {
+        val allCompetitionHomeRate = (
+            allCompetitions.homePoints + DEFAULT_HOME_POINTS * LEAGUE_PRIOR_WEIGHT
+            ) / (allCompetitions.matchWeight + LEAGUE_PRIOR_WEIGHT)
         val rate = (
-            (leagueHomePoints + priorPoints) /
-                (leagueMatchWeight + LEAGUE_PRIOR_WEIGHT)
+            (competition.homePoints + allCompetitionHomeRate * COMPETITION_PRIOR_WEIGHT) /
+                (competition.matchWeight + COMPETITION_PRIOR_WEIGHT)
             ).coerceIn(0.35, 0.75)
         return (400.0 * log10(rate / (1.0 - rate))).coerceIn(-75.0, 100.0)
     }
@@ -445,7 +517,7 @@ class LocalForecastingState(
     }
 
     private fun fingerprint(fixture: FixtureEntity): String = hash(
-        "$historyRevision|${fixture.providerFixtureId}|${fixture.matchDate}|${fixture.kickoffAt}|" +
+        "$historyRevision|${fixture.providerFixtureId}|${fixture.competitionCode}|${fixture.matchDate}|${fixture.kickoffAt}|" +
             "${fixture.venue}|${fixture.matchday}|${fixture.stage}|${fixture.homeTeamId}-${fixture.awayTeamId}|" +
             "${parameters.halfLifeDays}|${parameters.dixonColesRho}",
     )
@@ -456,7 +528,7 @@ class LocalForecastingState(
             .joinToString("") { "%02x".format(it) }
 
     companion object {
-        const val MODEL_VERSION = "dixon-coles-time-decay-local-v3"
+        const val MODEL_VERSION = "dixon-coles-cross-competition-time-decay-api-football-v6"
         const val MINIMUM_HISTORY_MATCHES = 3
         private const val DEFAULT_HOME_GOALS = 1.45
         private const val DEFAULT_AWAY_GOALS = 1.15
@@ -465,6 +537,7 @@ class LocalForecastingState(
         private const val DEFAULT_DRAW_RATE = 0.26
         private const val DEFAULT_AWAY_WIN_RATE = 0.29
         private const val LEAGUE_PRIOR_WEIGHT = 10.0
+        private const val COMPETITION_PRIOR_WEIGHT = 20.0
         private const val TEAM_PRIOR_WEIGHT = 8.0
         private const val MIN_DRAW_RATE = 0.10
         private const val MAX_DRAW_RATE = 0.45
@@ -472,11 +545,10 @@ class LocalForecastingState(
         private const val MAX_EXPECTED_GOALS = 5.0
         private const val MAX_GOALS = 10
         private const val ELO_K_FACTOR = 20.0
-        private const val SEASON_RATING_RETENTION = 0.80
         private const val RECENT_MATCH_LIMIT = 10
         private const val MODEL_EXPLANATION =
-            "Zeitgewichtetes Heim-/Auswärts-Poisson-Modell mit gegnerischer Defensivstärke, " +
-                "Ligamittelwert-Shrinkage und datenbasiertem Elo-Heimvorteil. " +
+            "Zeitgewichtetes Modell mit Teamform aus allen Wettbewerben, wettbewerbsspezifischem " +
+                "Ligamittelwert, gegnerischer Defensivstärke und datenbasiertem Elo-Heimvorteil. " +
                 "Dixon-Coles-Korrektur für niedrige Ergebnisse."
     }
 }

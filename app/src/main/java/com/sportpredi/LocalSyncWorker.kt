@@ -20,12 +20,11 @@ class LocalSyncWorker(
     override suspend fun doWork(): Result {
         return try {
             val database = SportPrediDatabase.get(applicationContext)
-            val report = LocalSyncRepository(applicationContext, database).synchronize()
-            val supplementaryReport = SupplementaryDataSync(database).synchronize(
-                ApiCredentialsStore(applicationContext).load(),
+            val report = LocalSyncRepository(database).synchronize(
+                apiKey = ApiCredentialsStore(applicationContext).load().apiFootballKey,
             )
             LocalPredictionEngine(database.sportPrediDao()).refreshUpcomingPredictions()
-            if (report.errors.isEmpty() && supplementaryReport.errors.isEmpty()) {
+            if (report.errors.isEmpty()) {
                 Result.success()
             } else {
                 Result.retry()
@@ -41,18 +40,18 @@ class LocalSyncWorker(
     companion object {
         private const val TAG = "LocalSyncWorker"
         private const val UNIQUE_WORK_NAME = "sportpredi-periodic-sync"
-        private const val SYNC_INTERVAL_HOURS = 12L
+        private const val SYNC_INTERVAL_MINUTES = 15L
 
         fun schedule(context: Context) {
             val constraints = Constraints.Builder()
                 .setRequiredNetworkType(NetworkType.CONNECTED)
                 .build()
             val request = PeriodicWorkRequestBuilder<LocalSyncWorker>(
-                SYNC_INTERVAL_HOURS,
-                TimeUnit.HOURS,
+                SYNC_INTERVAL_MINUTES,
+                TimeUnit.MINUTES,
             )
                 .setConstraints(constraints)
-                .setInitialDelay(SYNC_INTERVAL_HOURS, TimeUnit.HOURS)
+                .setInitialDelay(SYNC_INTERVAL_MINUTES, TimeUnit.MINUTES)
                 .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.MINUTES)
                 .build()
             WorkManager.getInstance(context.applicationContext).enqueueUniquePeriodicWork(
