@@ -4,12 +4,14 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -20,6 +22,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -45,6 +48,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -109,6 +113,7 @@ private fun AppScreen(database: SportPrediDatabase) {
     var syncError by remember { mutableStateOf<String?>(null) }
     var lastUpdated by remember { mutableStateOf<String?>(null) }
     var coverageRefresh by remember { mutableStateOf(0) }
+    val appScrollState = rememberScrollState()
 
     fun synchronize(force: Boolean) {
         if (syncLoading) return
@@ -237,7 +242,7 @@ private fun AppScreen(database: SportPrediDatabase) {
         modifier = Modifier
             .fillMaxSize()
             .safeDrawingPadding()
-            .verticalScroll(rememberScrollState())
+            .verticalScroll(appScrollState)
             .padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
@@ -297,6 +302,7 @@ private fun AppScreen(database: SportPrediDatabase) {
                 syncMessage = syncMessage,
                 syncError = syncError,
                 loading = syncLoading,
+                appScrollState = appScrollState,
                 onSynchronize = { synchronize(force = true) },
             )
             AppPage.PERFORMANCE -> PerformanceScreen(database)
@@ -561,6 +567,7 @@ private fun FixturesScreen(
     syncMessage: String,
     syncError: String?,
     loading: Boolean,
+    appScrollState: ScrollState,
     onSynchronize: () -> Unit,
 ) {
     val dao = remember(database) { database.sportPrediDao() }
@@ -587,6 +594,12 @@ private fun FixturesScreen(
     var coverageRows by remember { mutableStateOf(emptyList<SeasonCoverageRow>()) }
     var selectedFixture by remember { mutableStateOf<FixtureDisplay?>(null) }
     var showFixturesInfo by remember { mutableStateOf(false) }
+    var restoreListScrollPosition by remember { mutableStateOf(false) }
+    var listScrollPosition by remember { mutableStateOf(0) }
+    val fixtureScreenScope = rememberCoroutineScope()
+    BackHandler(enabled = selectedFixture != null) {
+        selectedFixture = null
+    }
     LaunchedEffect(database, lastUpdated, coverageRefresh) {
         coverageRows = withContext(Dispatchers.IO) { dao.seasonCoverage() }
     }
@@ -601,10 +614,27 @@ private fun FixturesScreen(
                 )
     }
 
-    Column(
-        modifier = Modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
+    if (selectedFixture != null) {
+        FixtureDetailsScreen(
+            display = selectedFixture!!,
+            dao = dao,
+            onBack = { selectedFixture = null },
+        )
+    } else {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .onGloballyPositioned {
+                    if (restoreListScrollPosition) {
+                        restoreListScrollPosition = false
+                        val savedPosition = listScrollPosition
+                        fixtureScreenScope.launch {
+                            appScrollState.scrollTo(savedPosition.coerceAtMost(appScrollState.maxValue))
+                        }
+                    }
+                },
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -743,7 +773,14 @@ private fun FixturesScreen(
         }
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             visibleFixtures.forEach { fixture ->
-                FixtureCard(fixture) { selectedFixture = fixture }
+                FixtureCard(fixture) {
+                    listScrollPosition = appScrollState.value
+                    fixtureScreenScope.launch {
+                        appScrollState.scrollTo(0)
+                        selectedFixture = fixture
+                        restoreListScrollPosition = true
+                    }
+                }
             }
         }
         if (coverageRows.isNotEmpty()) {
@@ -802,8 +839,6 @@ private fun FixturesScreen(
             }
         }
     }
-    selectedFixture?.let { fixture ->
-        FixtureDetailsDialog(fixture, dao) { selectedFixture = null }
     }
     if (showFixturesInfo) {
         AlertDialog(
@@ -1251,10 +1286,10 @@ private data class LocalStanding(
 }
 
 @Composable
-private fun FixtureDetailsDialog(
+private fun FixtureDetailsScreen(
     display: FixtureDisplay,
     dao: SportPrediDao,
-    onDismiss: () -> Unit,
+    onBack: () -> Unit,
 ) {
     var details by remember(display.providerFixtureId) { mutableStateOf<FixtureDetailsData?>(null) }
     var detailError by remember(display.providerFixtureId) { mutableStateOf<String?>(null) }
@@ -1306,181 +1341,250 @@ private fun FixtureDetailsDialog(
                 )
             }
         } catch (exception: Exception) {
+            if (exception is CancellationException) throw exception
             detailError = exception.message ?: "Spieldetails konnten nicht geladen werden."
         }
     }
 
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = {
-            Text("${display.homeTeamName ?: "TBD"} – ${display.awayTeamName ?: "TBD"}")
-        },
-        text = {
+    val lineupSummary = remember(display.lineupsJson) { parseLineupSummary(display.lineupsJson) }
+    val injurySummary = remember(display.injuriesJson) { parseInjurySummary(display.injuriesJson) }
+
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        OutlinedButton(onClick = onBack) { Text("← Zurück zu den Spielen") }
+        Card(modifier = Modifier.fillMaxWidth()) {
             Column(
-                modifier = Modifier
-                    .heightIn(max = 520.dp)
-                    .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text("${display.competitionName ?: "Wettbewerb"} · ${display.country ?: "Land unbekannt"}")
-                Text("Datum: ${display.kickoffAt?.let(::formatTimestamp) ?: display.matchDate}")
-                display.seasonYear?.let { Text("Saison: $it") }
-                display.matchday?.let { Text("Spieltag: $it") }
-                display.venue?.takeIf(String::isNotBlank)?.let { Text("Spielort: $it") }
-                Text("Status: ${display.status}")
-                if (display.postponedOrCancelled || display.rescheduled) {
-                    Text(
-                        when {
-                            display.status == "CANCELLED" -> "Dieses Spiel wurde abgesagt."
-                            display.rescheduled -> "Dieses Spiel wurde neu terminiert."
-                            else -> "Dieses Spiel wurde verschoben."
-                        },
-                    )
-                }
-                if (display.homeScore != null && display.awayScore != null) {
-                    Text("Endstand: ${display.homeScore} : ${display.awayScore}")
-                }
-                if (analysis != null) {
-                    Text("Prognosemodell: ${LocalForecastingState.MODEL_VERSION}")
-                    Text(
-                        "1X2: ${display.homeWinProbability?.let(::percent) ?: "n/a"} / " +
-                            "${display.drawProbability?.let(::percent) ?: "n/a"} / " +
-                            "${display.awayWinProbability?.let(::percent) ?: "n/a"}",
-                    )
-                    Text("Erwartete Tore: ${display.expectedHomeGoals?.format(2) ?: "n/a"} : ${display.expectedAwayGoals?.format(2) ?: "n/a"}")
-                    Text("Wahrscheinlichstes Ergebnis: ${analysis.mostLikelyScore}")
-                    Text(
-                        "Über 1,5 / 2,5 / 3,5 Tore: ${percent(analysis.over15Probability)} / " +
-                            "${percent(analysis.over25Probability)} / ${percent(analysis.over35Probability)}",
-                    )
-                    modelTip?.let {
-                        Text(
-                            "Wahrscheinlichster Modellmarkt: ${it.market} · " +
-                                "${percent(it.probability)}",
-                            color = MaterialTheme.colorScheme.primary,
-                        )
-                    } ?: Text("Kein Tipp in den berücksichtigten Märkten.")
-                    valueTip?.let {
-                        Text(
-                            "Quoten-Tipp: ${it.market} · Quote ${it.decimalOdds.format(2)} · " +
-                                "Modell-Value +${percent(it.expectedValue)} · ${it.bookmaker}",
-                            color = MaterialTheme.colorScheme.tertiary,
-                        )
-                    } ?: Text(
-                        if (odds.isEmpty()) {
-                            "Keine passenden Quoten gespeichert; daher kein Quoten-Tipp."
-                        } else {
-                            "Keine Quote ab 1,50 mit positivem modelliertem Erwartungswert."
-                        },
-                    )
-                    Text(
-                        "Der geschätzte Erwartungswert je eingesetzter Einheit ist Wahrscheinlichkeit × Quote − 1. " +
-                            "Nur Märkte mit Quote ab 1,50 und positivem Modellwert werden als Quoten-Tipp gezeigt. " +
-                            "Das ist eine unsichere Modellschätzung, keine Gewinnzusage oder Wettberatung.",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    Text("Beide Teams treffen: ${percent(analysis.bothTeamsToScoreProbability)}")
-                    Text("Doppelte Chance 1X / X2: ${percent(analysis.homeOrDrawProbability)} / ${percent(analysis.drawOrAwayProbability)}")
-                    Text(
-                        "Datenbasis: ${analysis.homeHistoryCount} vorherige Spiele für " +
-                            "${display.homeTeamName ?: "Heimteam"}, ${analysis.awayHistoryCount} für " +
-                            "${display.awayTeamName ?: "Auswärtsteam"}; " +
-                            analysis.confidenceLabel,
-                    )
-                    Text(
-                        "Ruhetage: ${analysis.homeRestDays?.toString() ?: "n/a"} / " +
-                            "${analysis.awayRestDays?.toString() ?: "n/a"}",
-                    )
-                    Text(
-                        "Elo: ${(analysis.homeElo - analysis.awayElo).format(0)} Punkte Differenz; " +
-                            "geschätzter Heimvorteil ${analysis.estimatedHomeAdvantageElo.format(0)} Elo",
-                    )
-                    Text(
-                        "Letzte Datenquelle: ${analysis.latestSourceUpdate ?: "Zeitpunkt nicht verfügbar"}; " +
-                            "Zeit-Halbwertszeit ${analysis.halfLifeDays.format(0)} Tage; " +
-                            "Dixon-Coles-ρ ${analysis.dixonColesRho.format(2)}",
-                    )
-                    Text(analysis.explanation)
-                    Text(
-                        "Top-Ergebnisse: " + analysis.scoreDistribution
-                            .sortedByDescending { it.probability }
-                            .take(5)
-                            .joinToString(" · ") { "${it.homeGoals}:${it.awayGoals} ${percent(it.probability)}" },
-                    )
-                } else {
-                    Text("Für dieses Spiel liegt noch keine ausführliche Prognose vor.")
-                }
-                if (analysisInvalid) {
-                    Text(
-                        "Die gespeicherte Prognoseanalyse ist beschädigt.",
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                }
-                detailError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-                details?.let { data ->
-                    Text("Form in diesem Wettbewerb", style = MaterialTheme.typography.titleSmall)
-                    Text("${data.homeTeamName}: ${formatRecentForm(data.homeHistory, data.fixture.homeTeamId)}")
-                    Text("${data.awayTeamName}: ${formatRecentForm(data.awayHistory, data.fixture.awayTeamId)}")
-                    Text("Direkte Duelle vor diesem Spiel", style = MaterialTheme.typography.titleSmall)
-                    if (data.headToHead.isEmpty()) {
-                        Text("Keine direkten Duelle in den lokal gespeicherten Daten.")
-                    } else {
-                        data.headToHead.forEach { match ->
-                            Text(
-                                "${match.matchDate}: ${data.teamNames[match.homeTeamId] ?: "TBD"} " +
-                                    "${match.homeScore}:${match.awayScore} ${data.teamNames[match.awayTeamId] ?: "TBD"}",
-                            )
-                        }
-                    }
-                    Text("Tabellenstand der lokal gespeicherten Saison", style = MaterialTheme.typography.titleSmall)
-                    val standings = calculateStandings(data.seasonFixtures)
-                    listOf(data.fixture.homeTeamId, data.fixture.awayTeamId)
-                        .filterNotNull()
-                        .distinct()
-                        .forEach { teamId ->
-                            val rank = standings.indexOfFirst { it.teamId == teamId } + 1
-                            standings.getOrNull(rank - 1)?.let { row ->
-                                Text(
-                                    "$rank. ${data.teamNames[teamId] ?: "Team"} · ${row.points} Pkt. · " +
-                                        "${row.played} Spiele · ${row.goalsFor}:${row.goalsAgainst} Tore",
-                                )
-                            } ?: Text("${data.teamNames[teamId] ?: "Team"}: noch keine Saisonwerte.")
-                        }
-                } ?: if (detailError == null) {
-                    Text("Lokale Teamform und Saisondaten werden geladen …")
-                } else {
-                    Unit
-                }
-                Text("Zusatzdaten von API-Football", style = MaterialTheme.typography.titleSmall)
                 Text(
-                    "xG: ${display.homeXg?.format(2) ?: "—"} : ${display.awayXg?.format(2) ?: "—"} · " +
-                        "Schüsse: ${display.homeShots?.toString() ?: "—"} : ${display.awayShots?.toString() ?: "—"} · " +
-                        "Ballbesitz: ${display.homePossession?.format(1)?.plus("%") ?: "—"} : " +
-                        "${display.awayPossession?.format(1)?.plus("%") ?: "—"}",
+                    "${display.competitionName ?: "Wettbewerb"} · ${display.country ?: "Land unbekannt"}",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                val lineupSummary = remember(display.lineupsJson) { parseLineupSummary(display.lineupsJson) }
-                val injurySummary = remember(display.injuriesJson) { parseInjurySummary(display.injuriesJson) }
-                if (lineupSummary.isEmpty()) {
-                    Text("Aufstellungen: keine Daten gespeichert.")
-                } else {
-                    Text("Aufstellungen:")
-                    lineupSummary.forEach { Text(it, style = MaterialTheme.typography.bodySmall) }
-                }
-                if (injurySummary.isEmpty()) {
-                    Text("Verletzungen: keine Daten gespeichert.")
-                } else {
-                    Text("Verletzungen:")
-                    injurySummary.forEach { Text(it, style = MaterialTheme.typography.bodySmall) }
+                Text(display.homeTeamName ?: "TBD", style = MaterialTheme.typography.headlineSmall)
+                Text("gegen", style = MaterialTheme.typography.bodySmall)
+                Text(display.awayTeamName ?: "TBD", style = MaterialTheme.typography.headlineSmall)
+                Text(display.kickoffAt?.let(::formatTimestamp) ?: display.matchDate)
+                listOfNotNull(
+                    display.seasonYear?.let { "Saison $it" },
+                    display.matchday?.let { "Spieltag $it" },
+                    display.venue?.takeIf(String::isNotBlank),
+                ).takeIf { it.isNotEmpty() }?.let {
+                    Text(it.joinToString(" · "), style = MaterialTheme.typography.bodySmall)
                 }
                 Text(
-                    "Kartenfelder werden von der verwendeten API-Football-Statistikantwort nicht zuverlässig " +
-                        "bereitgestellt und deshalb nicht geschätzt. Historische StatsBomb-Daten bleiben separat.",
-                    style = MaterialTheme.typography.bodySmall,
+                    when {
+                        display.status == "CANCELLED" -> "Abgesagt"
+                        display.postponedOrCancelled -> "Verschoben"
+                        display.rescheduled -> "Neu terminiert"
+                        display.homeScore != null && display.awayScore != null -> "Beendet"
+                        else -> "Anstehend"
+                    },
+                    color = if (display.status == "CANCELLED" || display.postponedOrCancelled) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.secondary
+                    },
+                    style = MaterialTheme.typography.labelLarge,
+                )
+                if (display.homeScore != null && display.awayScore != null) {
+                    Text(
+                        "Endstand · ${display.homeScore} : ${display.awayScore}",
+                        style = MaterialTheme.typography.titleLarge,
+                    )
+                }
+            }
+        }
+
+        DetailSection("Prognose") {
+            if (analysis == null) {
+                Text("Für dieses Spiel liegt noch keine ausführliche Prognose vor.")
+            } else {
+                Text("1X2-Wahrscheinlichkeiten", style = MaterialTheme.typography.labelLarge)
+                if (
+                    display.homeWinProbability != null &&
+                    display.drawProbability != null &&
+                    display.awayWinProbability != null
+                ) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        ProbabilitySummaryCell("1 · Heimsieg", display.homeWinProbability, Modifier.weight(1f))
+                        ProbabilitySummaryCell("X · Remis", display.drawProbability, Modifier.weight(1f))
+                        ProbabilitySummaryCell("2 · Auswärts", display.awayWinProbability, Modifier.weight(1f))
+                    }
+                }
+                Text(
+                    "Erwartete Tore (Heim : Auswärts): " +
+                        "${display.expectedHomeGoals?.format(2) ?: "—"} : " +
+                        "${display.expectedAwayGoals?.format(2) ?: "—"}",
+                )
+                Text("Wahrscheinlichstes Ergebnis: ${analysis.mostLikelyScore}")
+                Text("Modell: ${LocalForecastingState.MODEL_VERSION}", style = MaterialTheme.typography.bodySmall)
+                modelTip?.let {
+                    Text(
+                        "Wahrscheinlichster Markt: ${it.market} · ${percent(it.probability)}",
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                } ?: Text("Kein Tipp in den berücksichtigten Märkten.")
+                valueTip?.let {
+                    Text(
+                        "Quoten-Tipp: ${it.market} · Quote ${it.decimalOdds.format(2)} · " +
+                            "Modell-Value +${percent(it.expectedValue)} · ${it.bookmaker}",
+                        color = MaterialTheme.colorScheme.tertiary,
+                    )
+                } ?: Text(
+                    if (odds.isEmpty()) {
+                        "Keine passenden Quoten gespeichert."
+                    } else {
+                        "Keine Quote ab 1,50 mit positivem modelliertem Erwartungswert."
+                    },
                 )
             }
-        },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("Schließen") } },
-    )
+        }
+
+        if (analysis != null) {
+            DetailSection("Weitere Modellwerte") {
+                Text("Beide Teams treffen: ${percent(analysis.bothTeamsToScoreProbability)}")
+                Text(
+                    "Doppelte Chance 1X / X2: ${percent(analysis.homeOrDrawProbability)} / " +
+                        percent(analysis.drawOrAwayProbability),
+                )
+                Text(
+                    "Über 1,5 / 2,5 / 3,5 Tore: ${percent(analysis.over15Probability)} / " +
+                        "${percent(analysis.over25Probability)} / ${percent(analysis.over35Probability)}",
+                )
+                Text(
+                    "Datenbasis: ${analysis.homeHistoryCount} Spiele für ${display.homeTeamName ?: "Heimteam"}, " +
+                        "${analysis.awayHistoryCount} für ${display.awayTeamName ?: "Auswärtsteam"} · " +
+                        analysis.confidenceLabel,
+                )
+                Text(
+                    "Ruhetage Heim/Auswärts: ${analysis.homeRestDays?.toString() ?: "—"} / " +
+                        (analysis.awayRestDays?.toString() ?: "—"),
+                )
+                Text(
+                    "Elo-Differenz: ${(analysis.homeElo - analysis.awayElo).format(0)} · " +
+                        "Heimvorteil ${analysis.estimatedHomeAdvantageElo.format(0)}",
+                )
+                Text("Modellerklärung: ${analysis.explanation}")
+                Text(
+                    "Häufigste Ergebnisse: " + analysis.scoreDistribution
+                        .sortedByDescending { it.probability }
+                        .take(5)
+                        .joinToString(" · ") {
+                            "${it.homeGoals}:${it.awayGoals} ${percent(it.probability)}"
+                        },
+                )
+            }
+        }
+
+        if (analysisInvalid) {
+            Text("Die gespeicherte Prognoseanalyse ist beschädigt.", color = MaterialTheme.colorScheme.error)
+        }
+        detailError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+
+        details?.let { data ->
+            DetailSection("Form und direkte Duelle") {
+                Text("${data.homeTeamName}: ${formatRecentForm(data.homeHistory, data.fixture.homeTeamId)}")
+                Text("${data.awayTeamName}: ${formatRecentForm(data.awayHistory, data.fixture.awayTeamId)}")
+                HorizontalDivider()
+                Text("Direkte Duelle", style = MaterialTheme.typography.labelLarge)
+                if (data.headToHead.isEmpty()) {
+                    Text("Keine direkten Duelle in den lokal gespeicherten Daten.")
+                } else {
+                    data.headToHead.forEach { match ->
+                        Text(
+                            "${match.matchDate} · ${data.teamNames[match.homeTeamId] ?: "TBD"} " +
+                                "${match.homeScore}:${match.awayScore} " +
+                                "${data.teamNames[match.awayTeamId] ?: "TBD"}",
+                        )
+                    }
+                }
+            }
+            DetailSection("Saison-Tabelle") {
+                val standings = calculateStandings(data.seasonFixtures)
+                listOf(data.fixture.homeTeamId, data.fixture.awayTeamId)
+                    .filterNotNull()
+                    .distinct()
+                    .forEach { teamId ->
+                        val rank = standings.indexOfFirst { it.teamId == teamId } + 1
+                        standings.getOrNull(rank - 1)?.let { row ->
+                            Text(
+                                "$rank. ${data.teamNames[teamId] ?: "Team"} · ${row.points} Pkt. · " +
+                                    "${row.played} Spiele · ${row.goalsFor}:${row.goalsAgainst} Tore",
+                            )
+                        } ?: Text("${data.teamNames[teamId] ?: "Team"}: noch keine Saisonwerte.")
+                    }
+            }
+        } ?: if (detailError == null) {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Row(
+                    modifier = Modifier.padding(16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    CircularProgressIndicator(modifier = Modifier.width(24.dp), strokeWidth = 2.dp)
+                    Text("Lokale Teamform und Saisondaten werden geladen …")
+                }
+            }
+        } else {
+            Unit
+        }
+
+        DetailSection("Zusatzdaten") {
+            Text("Quelle: API-Football")
+            Text(
+                "xG Heim/Auswärts: ${display.homeXg?.format(2) ?: "—"} / " +
+                    "${display.awayXg?.format(2) ?: "—"}",
+            )
+            Text(
+                "Schüsse: ${display.homeShots?.toString() ?: "—"} / " +
+                    "${display.awayShots?.toString() ?: "—"}",
+            )
+            Text(
+                "Ballbesitz: ${display.homePossession?.format(1)?.plus("%") ?: "—"} / " +
+                    "${display.awayPossession?.format(1)?.plus("%") ?: "—"}",
+            )
+            Text("Aufstellungen", style = MaterialTheme.typography.labelLarge)
+            if (lineupSummary.isEmpty()) {
+                Text("Keine Aufstellungsdaten gespeichert.")
+            } else {
+                lineupSummary.forEach { Text(it, style = MaterialTheme.typography.bodySmall) }
+            }
+            Text("Verletzungen", style = MaterialTheme.typography.labelLarge)
+            if (injurySummary.isEmpty()) {
+                Text("Keine Verletzungsdaten gespeichert.")
+            } else {
+                injurySummary.forEach { Text(it, style = MaterialTheme.typography.bodySmall) }
+            }
+            Text(
+                "Karten werden für diese Zusatzquelle nicht zuverlässig geliefert. Fehlende Werte werden " +
+                    "nicht geschätzt; historische StatsBomb-Daten sind separat.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+@Composable
+private fun DetailSection(
+    title: String,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            content = {
+                Text(title, style = MaterialTheme.typography.titleMedium)
+                HorizontalDivider()
+                content()
+            },
+        )
+    }
 }
 
 private fun formatRecentForm(history: List<FixtureEntity>, teamId: Int?): String {
