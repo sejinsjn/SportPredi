@@ -22,6 +22,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -67,6 +69,13 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+private enum class AppPage {
+    FIXTURES,
+    PERFORMANCE,
+    STATSBOMB,
+    SETTINGS,
+}
+
 @Composable
 private fun AppScreen(database: SportPrediDatabase) {
     val context = LocalContext.current
@@ -77,8 +86,8 @@ private fun AppScreen(database: SportPrediDatabase) {
     val syncRepository = remember(database) {
         LocalSyncRepository(context.applicationContext, database, OpenLigaDbApi.create())
     }
-    var showPerformance by remember { mutableStateOf(false) }
-    var showStatsBomb by remember { mutableStateOf(false) }
+    var selectedPage by remember { mutableStateOf(AppPage.FIXTURES) }
+    var menuExpanded by remember { mutableStateOf(false) }
     var showApiCredentials by remember { mutableStateOf(false) }
     var oddsApiKey by remember { mutableStateOf("") }
     var apiFootballKey by remember { mutableStateOf("") }
@@ -229,90 +238,46 @@ private fun AppScreen(database: SportPrediDatabase) {
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Button(
-                onClick = {
-                    showPerformance = false
-                    showStatsBomb = false
-                },
+                onClick = { selectedPage = AppPage.FIXTURES },
                 modifier = Modifier.weight(1f),
             ) {
                 Text("Spiele")
             }
-            Button(
-                onClick = {
-                    showPerformance = true
-                    showStatsBomb = false
-                },
-                modifier = Modifier.weight(1f),
-            ) {
-                Text("Prediction-Qualität")
-            }
-        }
-        OutlinedButton(
-            onClick = {
-                showStatsBomb = true
-                showPerformance = false
-            },
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Text("StatsBomb-Historie · ausgewählte Spiele")
-        }
-        OutlinedButton(
-            onClick = {
-                scope.launch {
-                    try {
-                        val credentials = withContext(Dispatchers.IO) { apiCredentialsStore.load() }
-                        oddsApiKey = credentials.oddsApiKey
-                        apiFootballKey = credentials.apiFootballKey
-                        showApiCredentials = true
-                    } catch (exception: Exception) {
-                        apiCredentialsError = true
-                        apiCredentialsMessage =
-                            "API-Schlüssel konnten nicht gelesen werden: " +
-                                (exception.message ?: "Unbekannter Fehler")
-                    }
-                }
-            },
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Text("Zusätzliche Datenanbieter konfigurieren")
-        }
-        apiCredentialsMessage?.let {
-            Text(
-                it,
-                color = if (apiCredentialsError) MaterialTheme.colorScheme.error
-                else MaterialTheme.colorScheme.primary,
-            )
-        }
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
             OutlinedButton(
-                onClick = { exportLauncher.launch("sportpredi-backup.json") },
+                onClick = { menuExpanded = true },
                 modifier = Modifier.weight(1f),
             ) {
-                Text("Backup exportieren")
+                Text("Menü")
             }
-            OutlinedButton(
-                onClick = { importLauncher.launch(arrayOf("application/json", "text/*")) },
-                enabled = !syncLoading,
-                modifier = Modifier.weight(1f),
+            DropdownMenu(
+                expanded = menuExpanded,
+                onDismissRequest = { menuExpanded = false },
             ) {
-                Text("Backup wiederherstellen")
+                DropdownMenuItem(
+                    text = { Text("Prediction-Qualität") },
+                    onClick = {
+                        selectedPage = AppPage.PERFORMANCE
+                        menuExpanded = false
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("StatsBomb-Historie") },
+                    onClick = {
+                        selectedPage = AppPage.STATSBOMB
+                        menuExpanded = false
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("Einstellungen") },
+                    onClick = {
+                        selectedPage = AppPage.SETTINGS
+                        menuExpanded = false
+                    },
+                )
             }
         }
-        backupMessage?.let {
-            Text(
-                it,
-                color = if (backupError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
-            )
-        }
-        if (showStatsBomb) {
-            StatsBombHistoryScreen(database)
-        } else if (showPerformance) {
-            PerformanceScreen(database)
-        } else {
-            FixturesScreen(
+        when (selectedPage) {
+            AppPage.FIXTURES -> FixturesScreen(
                 database = database,
                 lastUpdated = lastUpdated,
                 coverageRefresh = coverageRefresh,
@@ -320,6 +285,32 @@ private fun AppScreen(database: SportPrediDatabase) {
                 syncError = syncError,
                 loading = syncLoading,
                 onSynchronize = { synchronize(force = true) },
+            )
+            AppPage.PERFORMANCE -> PerformanceScreen(database)
+            AppPage.STATSBOMB -> StatsBombHistoryScreen(database)
+            AppPage.SETTINGS -> SettingsScreen(
+                apiCredentialsMessage = apiCredentialsMessage,
+                apiCredentialsError = apiCredentialsError,
+                backupMessage = backupMessage,
+                backupError = backupError,
+                syncLoading = syncLoading,
+                onConfigureProviders = {
+                    scope.launch {
+                        try {
+                            val credentials = withContext(Dispatchers.IO) { apiCredentialsStore.load() }
+                            oddsApiKey = credentials.oddsApiKey
+                            apiFootballKey = credentials.apiFootballKey
+                            showApiCredentials = true
+                        } catch (exception: Exception) {
+                            apiCredentialsError = true
+                            apiCredentialsMessage =
+                                "API-Schlüssel konnten nicht gelesen werden: " +
+                                    (exception.message ?: "Unbekannter Fehler")
+                        }
+                    }
+                },
+                onExportBackup = { exportLauncher.launch("sportpredi-backup.json") },
+                onImportBackup = { importLauncher.launch(arrayOf("application/json", "text/*")) },
             )
         }
     }
@@ -465,6 +456,87 @@ private fun AppScreen(database: SportPrediDatabase) {
                 TextButton(onClick = { restoreUri = null }) { Text("Abbrechen") }
             },
         )
+    }
+}
+
+@Composable
+private fun SettingsScreen(
+    apiCredentialsMessage: String?,
+    apiCredentialsError: Boolean,
+    backupMessage: String?,
+    backupError: Boolean,
+    syncLoading: Boolean,
+    onConfigureProviders: () -> Unit,
+    onExportBackup: () -> Unit,
+    onImportBackup: () -> Unit,
+) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text("Einstellungen", style = MaterialTheme.typography.headlineMedium)
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text("Datenanbieter", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "Optionale API-Schlüssel für ergänzende Quoten und Spieldaten verwalten.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                OutlinedButton(
+                    onClick = onConfigureProviders,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("API-Schlüssel verwalten")
+                }
+                apiCredentialsMessage?.let {
+                    Text(
+                        it,
+                        color = if (apiCredentialsError) MaterialTheme.colorScheme.error
+                        else MaterialTheme.colorScheme.primary,
+                    )
+                }
+            }
+        }
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text("Lokale Daten", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "Sicherung exportieren oder eine vorhandene Sicherung wiederherstellen.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    OutlinedButton(
+                        onClick = onExportBackup,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text("Backup exportieren")
+                    }
+                    OutlinedButton(
+                        onClick = onImportBackup,
+                        enabled = !syncLoading,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text("Wiederherstellen")
+                    }
+                }
+                backupMessage?.let {
+                    Text(
+                        it,
+                        color = if (backupError) MaterialTheme.colorScheme.error
+                        else MaterialTheme.colorScheme.primary,
+                    )
+                }
+            }
+        }
     }
 }
 
