@@ -8,6 +8,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -15,6 +16,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -243,37 +245,42 @@ private fun AppScreen(database: SportPrediDatabase) {
             ) {
                 Text("Spiele")
             }
-            OutlinedButton(
-                onClick = { menuExpanded = true },
+            Box(
                 modifier = Modifier.weight(1f),
             ) {
-                Text("Menü")
-            }
-            DropdownMenu(
-                expanded = menuExpanded,
-                onDismissRequest = { menuExpanded = false },
-            ) {
-                DropdownMenuItem(
-                    text = { Text("Prediction-Qualität") },
-                    onClick = {
-                        selectedPage = AppPage.PERFORMANCE
-                        menuExpanded = false
-                    },
-                )
-                DropdownMenuItem(
-                    text = { Text("StatsBomb-Historie") },
-                    onClick = {
-                        selectedPage = AppPage.STATSBOMB
-                        menuExpanded = false
-                    },
-                )
-                DropdownMenuItem(
-                    text = { Text("Einstellungen") },
-                    onClick = {
-                        selectedPage = AppPage.SETTINGS
-                        menuExpanded = false
-                    },
-                )
+                OutlinedButton(
+                    onClick = { menuExpanded = true },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Menü")
+                }
+                DropdownMenu(
+                    modifier = Modifier.width(220.dp),
+                    expanded = menuExpanded,
+                    onDismissRequest = { menuExpanded = false },
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("Prediction-Qualität") },
+                        onClick = {
+                            selectedPage = AppPage.PERFORMANCE
+                            menuExpanded = false
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("StatsBomb-Historie") },
+                        onClick = {
+                            selectedPage = AppPage.STATSBOMB
+                            menuExpanded = false
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Einstellungen") },
+                        onClick = {
+                            selectedPage = AppPage.SETTINGS
+                            menuExpanded = false
+                        },
+                    )
+                }
             }
         }
         when (selectedPage) {
