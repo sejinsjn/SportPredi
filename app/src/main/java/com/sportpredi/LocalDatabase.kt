@@ -119,6 +119,14 @@ data class ApiFootballStandingsCacheEntity(
     val fetchedAt: String,
 )
 
+@Entity(tableName = "api_football_odds_cache")
+data class ApiFootballOddsCacheEntity(
+    @PrimaryKey val providerFixtureId: Long,
+    val quotesJson: String,
+    val status: String,
+    val fetchedAt: String,
+)
+
 @Entity(tableName = "backtest_runs")
 data class BacktestRunEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
@@ -191,6 +199,9 @@ data class FixtureDisplay(
     val expectedHomeGoals: Double?,
     val expectedAwayGoals: Double?,
     val analysisJson: String?,
+    val oddsQuotesJson: String?,
+    val oddsStatus: String?,
+    val oddsFetchedAt: String?,
 )
 
 data class SeasonCoverageRow(
@@ -348,6 +359,12 @@ interface SportPrediDao {
     @Upsert
     suspend fun upsertApiFootballStandingsCache(item: ApiFootballStandingsCacheEntity)
 
+    @Query("SELECT * FROM api_football_odds_cache WHERE providerFixtureId = :fixtureId LIMIT 1")
+    suspend fun apiFootballOdds(fixtureId: Long): ApiFootballOddsCacheEntity?
+
+    @Upsert
+    suspend fun upsertApiFootballOddsCache(item: ApiFootballOddsCacheEntity)
+
     @Query(
         """
         SELECT f.providerFixtureId, f.kickoffAt, f.matchDate, f.status,
@@ -357,12 +374,16 @@ interface SportPrediDao {
                home.name AS homeTeamName, away.name AS awayTeamName,
                f.homeScore, f.awayScore,
                p.homeWinProbability, p.drawProbability, p.awayWinProbability,
-               p.expectedHomeGoals, p.expectedAwayGoals, p.analysisJson
+               p.expectedHomeGoals, p.expectedAwayGoals, p.analysisJson,
+               odds.quotesJson AS oddsQuotesJson, odds.status AS oddsStatus,
+               odds.fetchedAt AS oddsFetchedAt
         FROM fixtures f
         LEFT JOIN competitions c ON c.providerCode = f.competitionCode
         LEFT JOIN seasons s ON s.id = f.seasonId
         LEFT JOIN teams home ON home.providerTeamId = f.homeTeamId
         LEFT JOIN teams away ON away.providerTeamId = f.awayTeamId
+        LEFT JOIN api_football_odds_cache odds
+          ON odds.providerFixtureId = f.providerFixtureId
         LEFT JOIN prediction_snapshots p
           ON p.id = (
             SELECT p2.id FROM prediction_snapshots p2
@@ -488,8 +509,9 @@ interface SportPrediDao {
         BacktestModelMetricEntity::class,
         BacktestPredictionEntity::class,
         ApiFootballStandingsCacheEntity::class,
+        ApiFootballOddsCacheEntity::class,
     ],
-    version = 10,
+    version = 11,
     exportSchema = false,
 )
 abstract class SportPrediDatabase : RoomDatabase() {
@@ -515,6 +537,7 @@ abstract class SportPrediDatabase : RoomDatabase() {
                     MIGRATION_7_8,
                     MIGRATION_8_9,
                     MIGRATION_9_10,
+                    MIGRATION_10_11,
                 ).build().also { instance = it }
             }
 
@@ -712,6 +735,21 @@ abstract class SportPrediDatabase : RoomDatabase() {
                     CREATE TABLE IF NOT EXISTS api_football_standings_cache (
                         seasonId TEXT NOT NULL PRIMARY KEY,
                         rowsJson TEXT NOT NULL,
+                        fetchedAt TEXT NOT NULL
+                    )
+                    """.trimIndent(),
+                )
+            }
+        }
+
+        internal val MIGRATION_10_11 = object : Migration(10, 11) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS api_football_odds_cache (
+                        providerFixtureId INTEGER NOT NULL PRIMARY KEY,
+                        quotesJson TEXT NOT NULL,
+                        status TEXT NOT NULL,
                         fetchedAt TEXT NOT NULL
                     )
                     """.trimIndent(),

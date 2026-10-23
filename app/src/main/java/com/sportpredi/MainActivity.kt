@@ -1018,6 +1018,15 @@ private fun FixtureCard(fixture: FixtureDisplay, onClick: () -> Unit) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+            ApiFootballValueTipSummary(
+                homeProbability = fixture.homeWinProbability,
+                drawProbability = fixture.drawProbability,
+                awayProbability = fixture.awayWinProbability,
+                quotesJson = fixture.oddsQuotesJson,
+                status = fixture.oddsStatus,
+                fetchedAt = fixture.oddsFetchedAt,
+                maxTips = 1,
+            )
             analysis?.let {
                 Text(
                     "${it.confidenceLabel} · Tippen für Details",
@@ -1259,6 +1268,23 @@ private fun FixtureDetailsScreen(
             }
         }
 
+        DetailSection("Value-Tipp · API-Football-Quoten") {
+            ApiFootballValueTipSummary(
+                homeProbability = display.homeWinProbability,
+                drawProbability = display.drawProbability,
+                awayProbability = display.awayWinProbability,
+                quotesJson = display.oddsQuotesJson,
+                status = display.oddsStatus,
+                fetchedAt = display.oddsFetchedAt,
+                maxTips = 3,
+            )
+            Text(
+                "Ein positiver Modell-EV ist eine Schätzung, keine Garantie für Treffer oder Gewinn.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+
         if (analysis != null) {
             DetailSection("Weitere Modellwerte") {
                 Text("Beide Teams treffen: ${percent(analysis.bothTeamsToScoreProbability)}")
@@ -1392,6 +1418,84 @@ private fun FixtureDetailsScreen(
             Unit
         }
 
+    }
+}
+
+@Composable
+private fun ApiFootballValueTipSummary(
+    homeProbability: Double?,
+    drawProbability: Double?,
+    awayProbability: Double?,
+    quotesJson: String?,
+    status: String?,
+    fetchedAt: String?,
+    maxTips: Int,
+) {
+    val quotes = remember(quotesJson) { parseApiFootballOddsQuotes(quotesJson) }
+    val tips = remember(quotes, homeProbability, drawProbability, awayProbability, fetchedAt) {
+        if (
+            quotes != null &&
+            homeProbability != null &&
+            drawProbability != null &&
+            awayProbability != null &&
+            fetchedAt != null
+        ) {
+            rankApiFootballValueTips(
+                quotes = quotes,
+                homeProbability = homeProbability,
+                drawProbability = drawProbability,
+                awayProbability = awayProbability,
+                fetchedAt = fetchedAt,
+            )
+        } else {
+            emptyList()
+        }
+    }
+    if (tips.isEmpty()) {
+        Text(
+            when {
+                homeProbability == null || drawProbability == null || awayProbability == null ->
+                    "Kein Value-Tipp verfügbar: Modellwahrscheinlichkeiten fehlen."
+                else -> "Kein Value-Tipp verfügbar."
+            },
+            style = MaterialTheme.typography.bodySmall,
+        )
+    } else {
+        tips.take(maxTips).forEach { tip ->
+            Text(
+                "${tip.market} · ${apiFootballOutcomeLabel(tip.outcome)} · " +
+                    "Quote ${tip.decimalOdds.format(2)} · Modell ${percent(tip.modelProbability)} · " +
+                    "EV +${(tip.expectedValue * 100).format(1)}% · ${tip.bookmaker}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary,
+            )
+        }
+    }
+    Text(
+        when (status) {
+            null -> "API-Football-Quoten für dieses Spiel noch nicht lokal gespeichert."
+            ApiFootballOddsCacheStatus.NO_ODDS ->
+                "API-Football hat für dieses Spiel keine Vorabquoten geliefert."
+            ApiFootballOddsCacheStatus.NO_1X2_QUOTES ->
+                "Keine eindeutig zuordenbaren 1X2-Quoten verfügbar."
+            ApiFootballOddsCacheStatus.AVAILABLE -> when {
+                quotes == null -> "Gespeicherte Quoten konnten nicht gelesen werden."
+                quotes.isEmpty() -> "Keine unterstützten 1X2-Quoten gespeichert."
+                tips.isEmpty() && homeProbability != null ->
+                    "Keine verfügbare Quote hat einen positiven Modell-EV."
+                else -> "Quotenquelle: API-Football"
+            }
+            else -> "Quotenstatus unbekannt."
+        },
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    fetchedAt?.let {
+        Text(
+            "Quotenstand: ${formatTimestamp(it)}",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 

@@ -105,6 +105,30 @@ data class ApiFootballStandingRow(
     val group: String?,
 )
 
+data class ApiFootballOddsResponseDto(
+    val fixture: ApiFootballOddsFixtureDto?,
+    val bookmakers: List<ApiFootballOddsBookmakerDto>?,
+)
+
+data class ApiFootballOddsFixtureDto(val id: Int?)
+
+data class ApiFootballOddsBookmakerDto(
+    val id: Int?,
+    val name: String?,
+    val bets: List<ApiFootballOddsBetDto>?,
+)
+
+data class ApiFootballOddsBetDto(
+    val id: Int?,
+    val name: String?,
+    val values: List<ApiFootballOddsValueDto>?,
+)
+
+data class ApiFootballOddsValueDto(
+    val value: String?,
+    val odd: String?,
+)
+
 internal fun apiFootballStandingsQueryParameters(
     leagueId: Int,
     seasonYear: Int,
@@ -237,6 +261,12 @@ interface ApiFootballApi {
         @Header("x-apisports-key") apiKey: String,
         @QueryMap query: Map<String, String>,
     ): Response<ApiFootballResponse<ApiFootballStandingsResponseDto>>
+
+    @GET("odds")
+    suspend fun odds(
+        @Header("x-apisports-key") apiKey: String,
+        @Query("fixture") fixtureId: Long,
+    ): Response<ApiFootballResponse<ApiFootballOddsResponseDto>>
 
     companion object {
         fun create(): ApiFootballApi =

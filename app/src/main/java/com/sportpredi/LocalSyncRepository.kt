@@ -217,6 +217,7 @@ object ApiFootballSyncDefaults {
     const val SEASONS_PER_LEAGUE = 3
     const val MAX_UPCOMING_SEASON_REQUESTS_PER_SYNC = 13
     const val MAX_STANDINGS_REQUESTS_PER_SYNC = 10
+    const val MAX_ODDS_REQUESTS_PER_SYNC = 10
     const val MAX_HISTORICAL_SEASON_REQUESTS_PER_SYNC = 30
 }
 
@@ -232,9 +233,11 @@ data class ApiFootballSyncLimits(
         ApiFootballSyncDefaults.MAX_UPCOMING_SEASON_REQUESTS_PER_SYNC,
     val maxStandingsRequestsPerSync: Int =
         ApiFootballSyncDefaults.MAX_STANDINGS_REQUESTS_PER_SYNC,
+    val maxOddsRequestsPerSync: Int = ApiFootballSyncDefaults.MAX_ODDS_REQUESTS_PER_SYNC,
     val maxHistoricalSeasonRequestsPerSync: Int =
         ApiFootballSyncDefaults.MAX_HISTORICAL_SEASON_REQUESTS_PER_SYNC,
     val standingsCacheTtl: Duration = Duration.ofHours(24),
+    val oddsCacheTtl: Duration = Duration.ofHours(6),
     val cooldown: Duration = Duration.ofMinutes(15),
 ) {
     init {
@@ -251,8 +254,10 @@ data class ApiFootballSyncLimits(
         require(seasonsPerLeague > 0)
         require(maxUpcomingSeasonRequestsPerSync >= 0)
         require(maxStandingsRequestsPerSync >= 0)
+        require(maxOddsRequestsPerSync >= 0)
         require(maxHistoricalSeasonRequestsPerSync >= 0)
         require(!standingsCacheTtl.isNegative && !standingsCacheTtl.isZero)
+        require(!oddsCacheTtl.isNegative && !oddsCacheTtl.isZero)
         require(!cooldown.isNegative)
     }
 }
@@ -683,6 +688,61 @@ class LocalSyncRepository(
                             ApiFootballStandingsCacheEntity(
                                 seasonId = request.seasonId,
                                 rowsJson = Gson().toJson(rows),
+                                fetchedAt = Instant.now().toString(),
+                            ),
+                        )
+                    } catch (exception: Exception) {
+                        if (exception is kotlinx.coroutines.CancellationException) throw exception
+                        errors += syncFailureMessage(exception)
+                        break
+                    }
+                }
+            }
+            if (errors.isEmpty()) {
+                val fixtureCandidates = apiFootballOddsEligibleFixtures(
+                    fixtures = normalizeApiFootballFixtures(fixtureRows, timestamp),
+                    today = today,
+                    upcomingDays = limits.upcomingDays,
+                )
+                val cachedOdds = fixtureCandidates.mapNotNull { fixture ->
+                    dao.apiFootballOdds(fixture.providerFixtureId)
+                        ?.let { fixture.providerFixtureId to it }
+                }.toMap()
+                val oddsLimit = safeApiFootballOddsRequestSlots(
+                    maxRequestsPerSync = limits.maxRequestsPerSync,
+                    requestsUsed = requests,
+                    dailyRemainingAfterReserve = providerDailyRemaining ?: 0,
+                    minuteRemainingAfterReserve = providerMinuteRemaining ?: 0,
+                    maxOddsRequestsPerSync = limits.maxOddsRequestsPerSync,
+                )
+                val oddsCandidates = selectApiFootballOddsCandidates(
+                    fixtures = fixtureCandidates,
+                    cachedByFixtureId = cachedOdds,
+                    today = today,
+                    upcomingDays = limits.upcomingDays,
+                    now = Instant.now(),
+                    cacheTtl = limits.oddsCacheTtl,
+                    requestLimit = oddsLimit,
+                )
+                for (fixture in oddsCandidates) {
+                    if (requests >= limits.maxRequestsPerSync) break
+                    try {
+                        countRequest()
+                        val response = api.odds(apiKey, fixture.providerFixtureId)
+                        val normalized = normalizeApiFootballOdds(
+                            response = validatedBody(response).response.orEmpty(),
+                            requestedFixtureId = fixture.providerFixtureId,
+                        )
+                        val status = when {
+                            !normalized.fixtureFound -> ApiFootballOddsCacheStatus.NO_ODDS
+                            normalized.quotes.isEmpty() -> ApiFootballOddsCacheStatus.NO_1X2_QUOTES
+                            else -> ApiFootballOddsCacheStatus.AVAILABLE
+                        }
+                        dao.upsertApiFootballOddsCache(
+                            ApiFootballOddsCacheEntity(
+                                providerFixtureId = fixture.providerFixtureId,
+                                quotesJson = Gson().toJson(normalized.quotes),
+                                status = status,
                                 fetchedAt = Instant.now().toString(),
                             ),
                         )
