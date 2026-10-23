@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
@@ -26,6 +27,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -41,6 +43,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
@@ -563,6 +566,9 @@ private fun FixturesScreen(
     var leagueFilter by remember { mutableStateOf("") }
     var seasonFilter by remember { mutableStateOf("") }
     var teamFilter by remember { mutableStateOf("") }
+    var filtersExpanded by remember { mutableStateOf(false) }
+    val activeFilterCount = listOf(countryFilter, leagueFilter, seasonFilter, teamFilter)
+        .count(String::isNotBlank)
     val today = LocalDate.now(ZoneOffset.UTC)
     val seasonEndYear = if (today.monthValue >= 7) today.year + 1 else today.year
     val currentSeasonEnd = LocalDate.of(seasonEndYear, 7, 1).minusDays(1)
@@ -605,56 +611,128 @@ private fun FixturesScreen(
                 Text("Info")
             }
         }
-        Text("Letzte lokale Aktualisierung: ${formatTimestamp(lastUpdated)}")
-        Text(syncMessage, style = MaterialTheme.typography.bodySmall)
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            listOf("Heute", "Morgen", "7 Tage", "Saison").forEach { option ->
-                OutlinedButton(
-                    onClick = { range = option },
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(
                     modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
                 ) {
-                    Text(option)
+                    Text(
+                        "Aktualisiert: ${formatTimestamp(lastUpdated)}",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Text(
+                        syncMessage,
+                        style = MaterialTheme.typography.bodySmall,
+                        maxLines = 2,
+                    )
+                }
+                Button(
+                    onClick = onSynchronize,
+                    enabled = !loading,
+                ) {
+                    if (loading) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.width(18.dp),
+                            strokeWidth = 2.dp,
+                        )
+                    } else {
+                        Text("Aktualisieren", maxLines = 1)
+                    }
                 }
             }
         }
-        Button(
-            onClick = onSynchronize,
-            enabled = !loading,
-            modifier = Modifier.fillMaxWidth(),
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text("Aktualisieren")
+            listOf("Heute", "Morgen", "7 Tage", "Saison").forEach { option ->
+                FilterChip(
+                    selected = range == option,
+                    onClick = { range = option },
+                    label = { Text(option, maxLines = 1) },
+                )
+            }
         }
-        OutlinedTextField(
-            countryFilter,
-            { countryFilter = it },
-            label = { Text("Land filtern") },
-            modifier = Modifier.fillMaxWidth(),
-            singleLine = true,
-        )
-        OutlinedTextField(
-            leagueFilter,
-            { leagueFilter = it },
-            label = { Text("Liga filtern") },
-            modifier = Modifier.fillMaxWidth(),
-            singleLine = true,
-        )
-        OutlinedTextField(
-            seasonFilter,
-            { seasonFilter = it },
-            label = { Text("Saison filtern") },
-            modifier = Modifier.fillMaxWidth(),
-            singleLine = true,
-        )
-        OutlinedTextField(
-            teamFilter,
-            { teamFilter = it },
-            label = { Text("Mannschaft filtern") },
-            modifier = Modifier.fillMaxWidth(),
-            singleLine = true,
-        )
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { filtersExpanded = !filtersExpanded }
+                        .padding(vertical = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        if (activeFilterCount == 0) "Filter"
+                        else "Filter · $activeFilterCount aktiv",
+                        style = MaterialTheme.typography.titleSmall,
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (activeFilterCount > 0) {
+                            TextButton(
+                                onClick = {
+                                    countryFilter = ""
+                                    leagueFilter = ""
+                                    seasonFilter = ""
+                                    teamFilter = ""
+                                },
+                            ) {
+                                Text("Zurücksetzen")
+                            }
+                        }
+                        Text(if (filtersExpanded) "Ausblenden" else "Anzeigen")
+                    }
+                }
+                if (filtersExpanded) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            countryFilter,
+                            { countryFilter = it },
+                            label = { Text("Land") },
+                            modifier = Modifier.weight(1f),
+                            singleLine = true,
+                        )
+                        OutlinedTextField(
+                            leagueFilter,
+                            { leagueFilter = it },
+                            label = { Text("Liga") },
+                            modifier = Modifier.weight(1f),
+                            singleLine = true,
+                        )
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            seasonFilter,
+                            { seasonFilter = it },
+                            label = { Text("Saison") },
+                            modifier = Modifier.weight(1f),
+                            singleLine = true,
+                        )
+                        OutlinedTextField(
+                            teamFilter,
+                            { teamFilter = it },
+                            label = { Text("Mannschaft") },
+                            modifier = Modifier.weight(1f),
+                            singleLine = true,
+                        )
+                    }
+                }
+            }
+        }
         if (loading) CircularProgressIndicator()
         syncError?.let { Text("Synchronisierungsfehler: $it", color = MaterialTheme.colorScheme.error) }
         if (visibleFixtures.isEmpty() && !loading) {
