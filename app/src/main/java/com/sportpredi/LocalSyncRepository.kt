@@ -1143,7 +1143,7 @@ class LocalSyncRepository(
                         )
                         val status = when {
                             !normalized.fixtureFound -> ApiFootballOddsCacheStatus.NO_ODDS
-                            normalized.quotes.isEmpty() -> ApiFootballOddsCacheStatus.NO_1X2_QUOTES
+                            normalized.quotes.isEmpty() -> ApiFootballOddsCacheStatus.NO_SUPPORTED_QUOTES
                             else -> ApiFootballOddsCacheStatus.AVAILABLE
                         }
                         dao.upsertApiFootballOddsCache(

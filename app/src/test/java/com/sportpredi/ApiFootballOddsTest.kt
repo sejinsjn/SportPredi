@@ -33,7 +33,7 @@ class ApiFootballOddsTest {
                             ),
                             ApiFootballOddsBetDto(
                                 id = 2,
-                                name = "Over/Under",
+                                name = "Player Props",
                                 values = listOf(ApiFootballOddsValueDto("Over 2.5", "1.9")),
                             ),
                         ),
@@ -90,6 +90,139 @@ class ApiFootballOddsTest {
         assertEquals(0.5, tips.first().expectedValue, 0.000001)
         assertEquals(0.125, tips[1].expectedValue, 0.000001)
         assertEquals("2026-10-23T12:00:00Z", tips.first().fetchedAt)
+    }
+
+    @Test
+    fun normalizesDoubleChanceTotalsBothTeamsToScoreAndDrawNoBetMarkets() {
+        val response = listOf(
+            ApiFootballOddsResponseDto(
+                fixture = ApiFootballOddsFixtureDto(123),
+                bookmakers = listOf(
+                    ApiFootballOddsBookmakerDto(
+                        id = 1,
+                        name = "Book A",
+                        bets = listOf(
+                            ApiFootballOddsBetDto(
+                                1,
+                                "Double Chance",
+                                listOf(
+                                    ApiFootballOddsValueDto("Home/Draw", "1.4"),
+                                    ApiFootballOddsValueDto("12", "1.5"),
+                                    ApiFootballOddsValueDto("X2", "1.6"),
+                                ),
+                            ),
+                            ApiFootballOddsBetDto(
+                                2,
+                                "Goals Over/Under",
+                                listOf(
+                                    ApiFootballOddsValueDto("Over 2.5", "2.1"),
+                                    ApiFootballOddsValueDto("Under 2,5", "1.8"),
+                                    ApiFootballOddsValueDto("Over 2.25", "1.9"),
+                                ),
+                            ),
+                            ApiFootballOddsBetDto(
+                                3,
+                                "Both Teams Score",
+                                listOf(
+                                    ApiFootballOddsValueDto("Yes", "1.9"),
+                                    ApiFootballOddsValueDto("No", "2.0"),
+                                ),
+                            ),
+                            ApiFootballOddsBetDto(
+                                4,
+                                "Draw No Bet",
+                                listOf(
+                                    ApiFootballOddsValueDto("Home", "1.7"),
+                                    ApiFootballOddsValueDto("Away", "2.2"),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        val quotes = normalizeApiFootballOdds(response, 123).quotes
+
+        assertEquals(9, quotes.size)
+        assertEquals(
+            setOf("DOUBLE_CHANCE", "TOTAL_GOALS", "BOTH_TEAMS_SCORE", "DRAW_NO_BET"),
+            quotes.map { it.market }.toSet(),
+        )
+        assertTrue(quotes.any { it.market == "TOTAL_GOALS" && it.outcome == "OVER_2.5" })
+        assertTrue(quotes.any { it.market == "TOTAL_GOALS" && it.outcome == "UNDER_2.5" })
+        assertFalse(quotes.any { it.outcome.contains("2.25") })
+    }
+
+    @Test
+    fun ranksValueAcrossMarketsAndModelsDrawNoBetPushesCorrectly() {
+        val analysis = sampleAnalysis()
+        val quotes = listOf(
+            ApiFootballOddsQuote(123, "TOTAL_GOALS", "OVER_2.5", 2.3, "Over Book"),
+            ApiFootballOddsQuote(123, "TOTAL_GOALS", "UNDER_2.5", 1.7, "Under Book"),
+            ApiFootballOddsQuote(123, "BOTH_TEAMS_SCORE", "YES", 2.0, "BTTS Book"),
+            ApiFootballOddsQuote(123, "DOUBLE_CHANCE", "HOME_DRAW", 1.5, "DC Book"),
+            ApiFootballOddsQuote(123, "DRAW_NO_BET", "HOME", 1.9, "DNB Book"),
+        )
+
+        val tips = rankApiFootballValueTips(
+            quotes = quotes,
+            homeProbability = 0.45,
+            drawProbability = 0.25,
+            awayProbability = 0.30,
+            fetchedAt = "2026-10-23T12:00:00Z",
+            analysis = analysis,
+        )
+
+        val byMarket = tips.associateBy { it.market }
+        assertTrue(byMarket.keys.containsAll(setOf("TOTAL_GOALS", "BOTH_TEAMS_SCORE", "DOUBLE_CHANCE", "DRAW_NO_BET")))
+        assertEquals(0.15, byMarket.getValue("TOTAL_GOALS").expectedValue, 0.000001)
+        assertEquals(0.10, byMarket.getValue("BOTH_TEAMS_SCORE").expectedValue, 0.000001)
+        assertEquals(0.05, byMarket.getValue("DOUBLE_CHANCE").expectedValue, 0.000001)
+        assertEquals(0.105, byMarket.getValue("DRAW_NO_BET").expectedValue, 0.000001)
+        assertEquals(0.25, byMarket.getValue("DRAW_NO_BET").pushProbability, 0.000001)
+        assertEquals(0.45, byMarket.getValue("DRAW_NO_BET").modelProbability, 0.000001)
+        assertEquals("Tore · Über 2,5", apiFootballMarketLabel("TOTAL_GOALS", "OVER_2.5"))
+    }
+
+    @Test
+    fun selectsOneBestTipOnlyWithinRealisticProbabilityOddsAndValueLimits() {
+        val selected = selectBestApiFootballValueTip(
+            quotes = listOf(
+                ApiFootballOddsQuote(123, "DOUBLE_CHANCE", "HOME_DRAW", 1.8, "Best EV"),
+                ApiFootballOddsQuote(123, "BOTH_TEAMS_SCORE", "YES", 2.0, "Lower EV"),
+                ApiFootballOddsQuote(123, "TOTAL_GOALS", "OVER_2.5", 2.3, "Low chance"),
+                ApiFootballOddsQuote(123, "1X2", "AWAY", 4.0, "Long shot"),
+            ),
+            homeProbability = 0.45,
+            drawProbability = 0.25,
+            awayProbability = 0.30,
+            fetchedAt = "2026-10-23T12:00:00Z",
+            analysis = sampleAnalysis(),
+        )
+
+        assertEquals("DOUBLE_CHANCE", selected?.market)
+        assertEquals("HOME_DRAW", selected?.outcome)
+        assertEquals(0.70, selected?.modelProbability ?: 0.0, 0.000001)
+        assertEquals(0.26, selected?.expectedValue ?: 0.0, 0.000001)
+    }
+
+    @Test
+    fun returnsNoTipWhenNoQuoteMeetsAllSelectionLimits() {
+        val selected = selectBestApiFootballValueTip(
+            quotes = listOf(
+                ApiFootballOddsQuote(123, "1X2", "HOME", 2.0, "Low probability"),
+                ApiFootballOddsQuote(123, "DOUBLE_CHANCE", "HOME_DRAW", 1.2, "Too short"),
+                ApiFootballOddsQuote(123, "BOTH_TEAMS_SCORE", "YES", 1.5, "Low expected value"),
+            ),
+            homeProbability = 0.45,
+            drawProbability = 0.25,
+            awayProbability = 0.30,
+            fetchedAt = "2026-10-23T12:00:00Z",
+            analysis = sampleAnalysis(),
+        )
+
+        assertEquals(null, selected)
     }
 
     @Test
@@ -171,6 +304,40 @@ class ApiFootballOddsTest {
 
     private fun quote(outcome: String, decimalOdds: Double, bookmaker: String) =
         ApiFootballOddsQuote(123, "1X2", outcome, decimalOdds, bookmaker)
+
+    private fun sampleAnalysis() = PredictionAnalysis(
+        scoreDistribution = listOf(
+            ScorelineProbability(0, 0, 0.10),
+            ScorelineProbability(1, 0, 0.15),
+            ScorelineProbability(0, 1, 0.10),
+            ScorelineProbability(1, 1, 0.15),
+            ScorelineProbability(2, 1, 0.20),
+            ScorelineProbability(1, 2, 0.10),
+            ScorelineProbability(3, 1, 0.10),
+            ScorelineProbability(0, 3, 0.10),
+        ),
+        expectedTotalGoals = 2.4,
+        mostLikelyScore = "2:1",
+        over15Probability = 0.65,
+        over25Probability = 0.50,
+        over35Probability = 0.20,
+        bothTeamsToScoreProbability = 0.55,
+        homeOrDrawProbability = 0.70,
+        drawOrAwayProbability = 0.55,
+        eitherTeamToWinProbability = 0.75,
+        homeHistoryCount = 10,
+        awayHistoryCount = 10,
+        homeElo = 1500.0,
+        awayElo = 1500.0,
+        estimatedHomeAdvantageElo = 60.0,
+        halfLifeDays = 365.0,
+        dixonColesRho = 0.0,
+        homeRestDays = null,
+        awayRestDays = null,
+        confidenceLabel = "Test",
+        latestSourceUpdate = null,
+        explanation = "Test analysis",
+    )
 
     private fun fixture(fixtureId: Long, date: String) = FixtureEntity(
         providerFixtureId = fixtureId,
