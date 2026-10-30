@@ -387,8 +387,77 @@ class ApiFootballOddsTest {
         assertEquals(0, safeApiFootballOddsRequestSlots(32, 20, 0, 7, 10))
     }
 
+    @Test
+    fun ranksTopTenDailyTipsByProbabilityThenExpectedValueAndExcludesOtherDates() {
+        val today = LocalDate.parse("2026-10-23")
+        val fixtures = (0..11).map { index ->
+            dailyFixture(
+                fixtureId = index + 1L,
+                date = today,
+                homeProbability = 0.75 + index * 0.01,
+            )
+        } + listOf(
+            dailyFixture(100, today, homeProbability = 0.80, decimalOdds = 1.8),
+            dailyFixture(101, today.plusDays(1), homeProbability = 0.99),
+            dailyFixture(102, today, homeProbability = 0.85, decimalOdds = 2.0),
+        )
+
+        val tips = selectTopDailyApiFootballValueTips(fixtures, today)
+
+        assertEquals(10, tips.size)
+        assertEquals(0.86, tips.first().tip.modelProbability, 0.000001)
+        assertTrue(tips.all { it.fixture.matchDate == today.toString() })
+        val tiedProbabilityTips = tips.filter {
+            kotlin.math.abs(it.tip.modelProbability - 0.80) < 0.000001
+        }
+        assertEquals(2, tiedProbabilityTips.size)
+        assertEquals(1.8, tiedProbabilityTips.first().tip.decimalOdds, 0.0)
+        assertTrue(tips.zipWithNext().all { (left, right) ->
+            left.tip.modelProbability + 0.000001 >= right.tip.modelProbability &&
+                (left.tip.modelProbability - right.tip.modelProbability > 0.000001 ||
+                    left.tip.expectedValue + 0.000001 >= right.tip.expectedValue)
+        })
+    }
+
     private fun quote(outcome: String, decimalOdds: Double, bookmaker: String) =
         ApiFootballOddsQuote(123, "1X2", outcome, decimalOdds, bookmaker)
+
+    private fun dailyFixture(
+        fixtureId: Long,
+        date: LocalDate,
+        homeProbability: Double,
+        decimalOdds: Double = 1.5,
+    ) = FixtureDisplay(
+        providerFixtureId = fixtureId,
+        competitionCode = "39",
+        kickoffAt = "${date}T19:00:00Z",
+        matchDate = date.toString(),
+        status = "SCHEDULED",
+        postponedOrCancelled = false,
+        rescheduled = false,
+        venue = null,
+        matchday = null,
+        competitionName = "Test League",
+        country = "Test",
+        seasonYear = 2026,
+        homeTeamId = 1,
+        awayTeamId = 2,
+        homeTeamName = "Home $fixtureId",
+        awayTeamName = "Away $fixtureId",
+        homeScore = null,
+        awayScore = null,
+        homeWinProbability = homeProbability,
+        drawProbability = 0.10,
+        awayWinProbability = 0.90 - homeProbability,
+        expectedHomeGoals = null,
+        expectedAwayGoals = null,
+        analysisJson = null,
+        oddsQuotesJson = Gson().toJson(
+            listOf(ApiFootballOddsQuote(fixtureId, "1X2", "HOME", decimalOdds, "Test Book")),
+        ),
+        oddsStatus = ApiFootballOddsCacheStatus.AVAILABLE,
+        oddsFetchedAt = "2026-10-23T12:00:00Z",
+    )
 
     private fun sampleAnalysis() = PredictionAnalysis(
         scoreDistribution = listOf(

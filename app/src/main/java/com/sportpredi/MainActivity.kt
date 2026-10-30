@@ -650,6 +650,17 @@ private fun FixturesScreen(
                     (fixture.awayTeamName ?: "").contains(teamFilter, ignoreCase = true)
                 )
     }
+    val dailyTopTips = remember(visibleFixtures, today) {
+        selectTopDailyApiFootballValueTips(visibleFixtures, today)
+    }
+    val openFixture: (FixtureDisplay) -> Unit = { fixture ->
+        listScrollPosition = appScrollState.value
+        fixtureScreenScope.launch {
+            appScrollState.scrollTo(0)
+            selectedFixture = fixture
+            restoreListScrollPosition = true
+        }
+    }
 
     if (selectedFixture != null) {
         FixtureDetailsScreen(
@@ -735,6 +746,7 @@ private fun FixturesScreen(
                 )
             }
         }
+        DailyTopTipsSection(dailyTopTips, onFixtureClick = openFixture)
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
@@ -897,14 +909,7 @@ private fun FixturesScreen(
         }
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             visibleFixtures.forEach { fixture ->
-                FixtureCard(fixture) {
-                    listScrollPosition = appScrollState.value
-                    fixtureScreenScope.launch {
-                        appScrollState.scrollTo(0)
-                        selectedFixture = fixture
-                        restoreListScrollPosition = true
-                    }
-                }
+                FixtureCard(fixture) { openFixture(fixture) }
             }
         }
         if (coverageRows.isNotEmpty() || targetCatalogChecked) {
@@ -1406,6 +1411,115 @@ private fun parsePredictionAnalysis(json: String?): PredictionAnalysis? =
     } catch (exception: JsonParseException) {
         null
     }
+
+internal data class DailyValueTipEntry(
+    val fixture: FixtureDisplay,
+    val tip: ApiFootballValueTip,
+)
+
+internal fun selectTopDailyApiFootballValueTips(
+    fixtures: List<FixtureDisplay>,
+    today: LocalDate,
+): List<DailyValueTipEntry> =
+    fixtures.asSequence()
+        .filter { fixture ->
+            fixture.matchDate == today.toString() &&
+                !fixture.postponedOrCancelled &&
+                fixture.status != "CANCELLED" &&
+                fixture.homeScore == null &&
+                fixture.awayScore == null
+        }
+        .mapNotNull { fixture ->
+            val homeProbability = fixture.homeWinProbability ?: return@mapNotNull null
+            val drawProbability = fixture.drawProbability ?: return@mapNotNull null
+            val awayProbability = fixture.awayWinProbability ?: return@mapNotNull null
+            val fetchedAt = fixture.oddsFetchedAt ?: return@mapNotNull null
+            val quotes = parseApiFootballOddsQuotes(fixture.oddsQuotesJson) ?: return@mapNotNull null
+            val tip = selectBestApiFootballValueTip(
+                quotes = quotes,
+                homeProbability = homeProbability,
+                drawProbability = drawProbability,
+                awayProbability = awayProbability,
+                fetchedAt = fetchedAt,
+                analysis = parsePredictionAnalysis(fixture.analysisJson),
+            ) ?: return@mapNotNull null
+            DailyValueTipEntry(fixture, tip)
+        }
+        .distinctBy { it.fixture.providerFixtureId }
+        .sortedWith(
+            compareByDescending<DailyValueTipEntry> { it.tip.modelProbability }
+                .thenByDescending { it.tip.expectedValue }
+                .thenBy { it.fixture.kickoffAt.orEmpty() }
+                .thenBy { it.fixture.providerFixtureId },
+        )
+        .take(10)
+        .toList()
+
+@Composable
+private fun DailyTopTipsSection(
+    tips: List<DailyValueTipEntry>,
+    onFixtureClick: (FixtureDisplay) -> Unit,
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text("Top 10 Tipps heute", style = MaterialTheme.typography.titleLarge)
+            Text(
+                "Nach Modellchance sortiert · mindestens " +
+                    "${percent(ApiFootballTipSelectionRules.MIN_MODEL_PROBABILITY)} Chance · Quote " +
+                    "${ApiFootballTipSelectionRules.MIN_DECIMAL_ODDS.format(2)}–" +
+                    "${ApiFootballTipSelectionRules.MAX_DECIMAL_ODDS.format(2)} · EV mindestens " +
+                    "${(ApiFootballTipSelectionRules.MIN_EXPECTED_VALUE * 100).format(0)} %",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (tips.isEmpty()) {
+                Text("Heute gibt es keine Tipps, die alle Grenzen erfüllen.")
+            } else {
+                tips.forEachIndexed { index, entry ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onFixtureClick(entry.fixture) }
+                            .padding(vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("${index + 1}.", style = MaterialTheme.typography.titleMedium)
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(2.dp),
+                        ) {
+                            Text(
+                                "${entry.fixture.homeTeamName ?: "TBD"} – " +
+                                    (entry.fixture.awayTeamName ?: "TBD"),
+                                style = MaterialTheme.typography.titleSmall,
+                            )
+                            Text(
+                                "${apiFootballMarketLabel(entry.tip.market, entry.tip.outcome)} · " +
+                                    "Quote ${entry.tip.decimalOdds.format(2)} · " +
+                                    "Chance ${percent(entry.tip.modelProbability)} · " +
+                                    "EV +${(entry.tip.expectedValue * 100).format(1)}%",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                            Text(
+                                "${entry.fixture.kickoffAt?.let(::formatTimestamp) ?: entry.fixture.matchDate} · " +
+                                    (entry.fixture.competitionName ?: "Wettbewerb unbekannt"),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                    if (index < tips.lastIndex) HorizontalDivider()
+                }
+            }
+        }
+    }
+}
 
 private data class FixtureDetailsData(
     val fixture: FixtureEntity,
