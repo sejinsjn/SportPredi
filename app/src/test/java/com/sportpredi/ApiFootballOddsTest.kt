@@ -402,7 +402,7 @@ class ApiFootballOddsTest {
             dailyFixture(102, today, homeProbability = 0.85, decimalOdds = 2.0),
         )
 
-        val tips = selectTopDailyApiFootballValueTips(fixtures, today)
+        val tips = selectTopApiFootballValueTips(fixtures, today, today)
 
         assertEquals(10, tips.size)
         assertEquals(0.86, tips.first().tip.modelProbability, 0.000001)
@@ -417,6 +417,30 @@ class ApiFootballOddsTest {
                 (left.tip.modelProbability - right.tip.modelProbability > 0.000001 ||
                     left.tip.expectedValue + 0.000001 >= right.tip.expectedValue)
         })
+    }
+
+    @Test
+    fun filtersTopTipsToTheSelectedDateWindow() {
+        val today = LocalDate.parse("2026-10-23")
+        val fixtures = listOf(
+            dailyFixture(1, today, homeProbability = 0.85),
+            dailyFixture(2, today.plusDays(1), homeProbability = 0.80),
+            dailyFixture(3, today.plusDays(2), homeProbability = 0.89),
+        )
+
+        val tomorrowTips = selectTopApiFootballValueTips(
+            fixtures,
+            startDate = today.plusDays(1),
+            endDate = today.plusDays(1),
+        )
+        val todayAndTomorrowTips = selectTopApiFootballValueTips(
+            fixtures,
+            startDate = today,
+            endDate = today.plusDays(1),
+        )
+
+        assertEquals(listOf(2L), tomorrowTips.map { it.fixture.providerFixtureId })
+        assertEquals(listOf(1L, 2L), todayAndTomorrowTips.map { it.fixture.providerFixtureId })
     }
 
     private fun quote(outcome: String, decimalOdds: Double, bookmaker: String) =

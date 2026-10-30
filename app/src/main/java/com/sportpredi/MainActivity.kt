@@ -564,6 +564,7 @@ private fun FixturesScreen(
         "Saison" -> currentSeasonEnd
         else -> today.plusDays(6)
     }
+    val topTipsStartDate = if (range == "Morgen") today.plusDays(1) else today
     val fixtures by dao.observeUpcoming(today.toString(), endDate.toString())
         .collectAsState(initial = emptyList())
     var coverageRows by remember { mutableStateOf(emptyList<SeasonCoverageRow>()) }
@@ -650,8 +651,14 @@ private fun FixturesScreen(
                     (fixture.awayTeamName ?: "").contains(teamFilter, ignoreCase = true)
                 )
     }
-    val dailyTopTips = remember(visibleFixtures, today) {
-        selectTopDailyApiFootballValueTips(visibleFixtures, today)
+    val dailyTopTips = remember(visibleFixtures, topTipsStartDate, endDate) {
+        selectTopApiFootballValueTips(visibleFixtures, topTipsStartDate, endDate)
+    }
+    val topTipsPeriodTitle = when (range) {
+        "Heute" -> "heute"
+        "Morgen" -> "morgen"
+        "Saison" -> "diese Saison"
+        else -> "in den nächsten 7 Tagen"
     }
     val openFixture: (FixtureDisplay) -> Unit = { fixture ->
         listScrollPosition = appScrollState.value
@@ -746,7 +753,11 @@ private fun FixturesScreen(
                 )
             }
         }
-        DailyTopTipsSection(dailyTopTips, onFixtureClick = openFixture)
+        DailyTopTipsSection(
+            tips = dailyTopTips,
+            periodTitle = topTipsPeriodTitle,
+            onFixtureClick = openFixture,
+        )
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
@@ -1412,18 +1423,20 @@ private fun parsePredictionAnalysis(json: String?): PredictionAnalysis? =
         null
     }
 
-internal data class DailyValueTipEntry(
+internal data class TopValueTipEntry(
     val fixture: FixtureDisplay,
     val tip: ApiFootballValueTip,
 )
 
-internal fun selectTopDailyApiFootballValueTips(
+internal fun selectTopApiFootballValueTips(
     fixtures: List<FixtureDisplay>,
-    today: LocalDate,
-): List<DailyValueTipEntry> =
+    startDate: LocalDate,
+    endDate: LocalDate,
+): List<TopValueTipEntry> =
     fixtures.asSequence()
         .filter { fixture ->
-            fixture.matchDate == today.toString() &&
+            fixture.matchDate >= startDate.toString() &&
+                fixture.matchDate <= endDate.toString() &&
                 !fixture.postponedOrCancelled &&
                 fixture.status != "CANCELLED" &&
                 fixture.homeScore == null &&
@@ -1443,11 +1456,11 @@ internal fun selectTopDailyApiFootballValueTips(
                 fetchedAt = fetchedAt,
                 analysis = parsePredictionAnalysis(fixture.analysisJson),
             ) ?: return@mapNotNull null
-            DailyValueTipEntry(fixture, tip)
+            TopValueTipEntry(fixture, tip)
         }
         .distinctBy { it.fixture.providerFixtureId }
         .sortedWith(
-            compareByDescending<DailyValueTipEntry> { it.tip.modelProbability }
+            compareByDescending<TopValueTipEntry> { it.tip.modelProbability }
                 .thenByDescending { it.tip.expectedValue }
                 .thenBy { it.fixture.kickoffAt.orEmpty() }
                 .thenBy { it.fixture.providerFixtureId },
@@ -1457,7 +1470,8 @@ internal fun selectTopDailyApiFootballValueTips(
 
 @Composable
 private fun DailyTopTipsSection(
-    tips: List<DailyValueTipEntry>,
+    tips: List<TopValueTipEntry>,
+    periodTitle: String,
     onFixtureClick: (FixtureDisplay) -> Unit,
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
@@ -1465,9 +1479,9 @@ private fun DailyTopTipsSection(
             modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Text("Top 10 Tipps heute", style = MaterialTheme.typography.titleLarge)
+            Text("Top 10 Tipps $periodTitle", style = MaterialTheme.typography.titleLarge)
             Text(
-                "Nach Modellchance sortiert · mindestens " +
+                "Zeitraum über die Auswahl oben · nach Modellchance sortiert · mindestens " +
                     "${percent(ApiFootballTipSelectionRules.MIN_MODEL_PROBABILITY)} Chance · Quote " +
                     "${ApiFootballTipSelectionRules.MIN_DECIMAL_ODDS.format(2)}–" +
                     "${ApiFootballTipSelectionRules.MAX_DECIMAL_ODDS.format(2)} · EV mindestens " +
@@ -1476,7 +1490,7 @@ private fun DailyTopTipsSection(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             if (tips.isEmpty()) {
-                Text("Heute gibt es keine Tipps, die alle Grenzen erfüllen.")
+                Text("Für diesen Zeitraum gibt es keine Tipps, die alle Grenzen erfüllen.")
             } else {
                 tips.forEachIndexed { index, entry ->
                     Row(
