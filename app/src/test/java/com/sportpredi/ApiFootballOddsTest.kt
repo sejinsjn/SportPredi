@@ -190,21 +190,106 @@ class ApiFootballOddsTest {
         val selected = selectBestApiFootballValueTip(
             quotes = listOf(
                 ApiFootballOddsQuote(123, "DOUBLE_CHANCE", "HOME_DRAW", 1.8, "Best EV"),
-                ApiFootballOddsQuote(123, "BOTH_TEAMS_SCORE", "YES", 2.0, "Lower EV"),
+                ApiFootballOddsQuote(123, "BOTH_TEAMS_SCORE", "YES", 1.8, "Lower EV"),
                 ApiFootballOddsQuote(123, "TOTAL_GOALS", "OVER_2.5", 2.3, "Low chance"),
                 ApiFootballOddsQuote(123, "1X2", "AWAY", 4.0, "Long shot"),
             ),
-            homeProbability = 0.45,
+            homeProbability = 0.50,
             drawProbability = 0.25,
-            awayProbability = 0.30,
+            awayProbability = 0.25,
             fetchedAt = "2026-10-23T12:00:00Z",
             analysis = sampleAnalysis(),
         )
 
         assertEquals("DOUBLE_CHANCE", selected?.market)
         assertEquals("HOME_DRAW", selected?.outcome)
-        assertEquals(0.70, selected?.modelProbability ?: 0.0, 0.000001)
-        assertEquals(0.26, selected?.expectedValue ?: 0.0, 0.000001)
+        assertEquals(0.75, selected?.modelProbability ?: 0.0, 0.000001)
+        assertEquals(0.35, selected?.expectedValue ?: 0.0, 0.000001)
+    }
+
+    @Test
+    fun choosesHighestProbabilityBeforeHigherExpectedValue() {
+        val selected = selectBestApiFootballValueTip(
+            quotes = listOf(
+                ApiFootballOddsQuote(123, "DOUBLE_CHANCE", "HOME_DRAW", 1.5, "Higher probability"),
+                ApiFootballOddsQuote(123, "DOUBLE_CHANCE", "HOME_AWAY", 1.8, "Higher EV"),
+            ),
+            homeProbability = 0.70,
+            drawProbability = 0.20,
+            awayProbability = 0.10,
+            fetchedAt = "2026-10-23T12:00:00Z",
+        )
+
+        assertEquals("HOME_DRAW", selected?.outcome)
+        assertEquals(0.90, selected?.modelProbability ?: 0.0, 0.000001)
+        assertEquals(0.35, selected?.expectedValue ?: 0.0, 0.000001)
+    }
+
+    @Test
+    fun acceptsOddsAtOnePointFiveAndOnePointEight() {
+        val oddsAtOnePointFive = selectBestApiFootballValueTip(
+            quotes = listOf(ApiFootballOddsQuote(123, "DOUBLE_CHANCE", "HOME_DRAW", 1.5, "Book A")),
+            homeProbability = 0.50,
+            drawProbability = 0.25,
+            awayProbability = 0.25,
+            fetchedAt = "2026-10-23T12:00:00Z",
+        )
+        val oddsAtOnePointEight = selectBestApiFootballValueTip(
+            quotes = listOf(ApiFootballOddsQuote(123, "DOUBLE_CHANCE", "HOME_DRAW", 1.8, "Book B")),
+            homeProbability = 0.55,
+            drawProbability = 0.25,
+            awayProbability = 0.20,
+            fetchedAt = "2026-10-23T12:00:00Z",
+        )
+
+        assertEquals(1.5, oddsAtOnePointFive?.decimalOdds ?: 0.0, 0.0)
+        assertEquals(1.8, oddsAtOnePointEight?.decimalOdds ?: 0.0, 0.0)
+    }
+
+    @Test
+    fun rejectsOddsOutsideTheRecommendedBandIncludingOnePointTwo() {
+        val selected = selectBestApiFootballValueTip(
+            quotes = listOf(
+                quote("HOME", 1.2, "Too short"),
+                ApiFootballOddsQuote(123, "DOUBLE_CHANCE", "HOME_DRAW", 2.0, "Too long"),
+            ),
+            homeProbability = 0.90,
+            drawProbability = 0.05,
+            awayProbability = 0.05,
+            fetchedAt = "2026-10-23T12:00:00Z",
+        )
+
+        assertEquals(null, selected)
+    }
+
+    @Test
+    fun usesExpectedValueAsTieBreakerForEqualProbabilities() {
+        val selected = selectBestApiFootballValueTip(
+            quotes = listOf(
+                quote("HOME", 1.5, "Lower EV"),
+                ApiFootballOddsQuote(123, "DRAW_NO_BET", "HOME", 1.8, "Higher EV"),
+            ),
+            homeProbability = 0.80,
+            drawProbability = 0.0,
+            awayProbability = 0.20,
+            fetchedAt = "2026-10-23T12:00:00Z",
+        )
+
+        assertEquals("DRAW_NO_BET", selected?.market)
+        assertEquals(0.80, selected?.modelProbability ?: 0.0, 0.000001)
+    }
+
+    @Test
+    fun rejectsTipsBelowSeventyFivePercentEvenWhenExpectedValueIsPositive() {
+        val selected = selectBestApiFootballValueTip(
+            quotes = listOf(ApiFootballOddsQuote(123, "DOUBLE_CHANCE", "HOME_DRAW", 1.8, "High EV")),
+            homeProbability = 0.50,
+            drawProbability = 0.24,
+            awayProbability = 0.26,
+            fetchedAt = "2026-10-23T12:00:00Z",
+        )
+
+        assertEquals(null, selected)
     }
 
     @Test

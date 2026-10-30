@@ -40,9 +40,9 @@ private data class ModelMarketProbability(
 private data class MarketOutcome(val market: String, val outcome: String)
 
 internal object ApiFootballTipSelectionRules {
-    const val MIN_MODEL_PROBABILITY = 0.55
+    const val MIN_MODEL_PROBABILITY = 0.75
     const val MIN_DECIMAL_ODDS = 1.30
-    const val MAX_DECIMAL_ODDS = 2.50
+    const val MAX_DECIMAL_ODDS = 1.80
     const val MIN_EXPECTED_VALUE = 0.03
 }
 
@@ -347,11 +347,19 @@ internal fun selectBestApiFootballValueTip(
         awayProbability = awayProbability,
         fetchedAt = fetchedAt,
         analysis = analysis,
-    ).firstOrNull { tip ->
-        tip.modelProbability >= ApiFootballTipSelectionRules.MIN_MODEL_PROBABILITY &&
-            tip.decimalOdds in ApiFootballTipSelectionRules.MIN_DECIMAL_ODDS..ApiFootballTipSelectionRules.MAX_DECIMAL_ODDS &&
-            tip.expectedValue >= ApiFootballTipSelectionRules.MIN_EXPECTED_VALUE
-    }
+    ).asSequence()
+        .filter { tip ->
+            tip.modelProbability >= ApiFootballTipSelectionRules.MIN_MODEL_PROBABILITY &&
+                tip.decimalOdds in ApiFootballTipSelectionRules.MIN_DECIMAL_ODDS..ApiFootballTipSelectionRules.MAX_DECIMAL_ODDS &&
+                tip.expectedValue >= ApiFootballTipSelectionRules.MIN_EXPECTED_VALUE
+        }
+        .sortedWith(
+            compareByDescending<ApiFootballValueTip> { it.modelProbability }
+                .thenByDescending { it.expectedValue }
+                .thenByDescending { it.decimalOdds }
+                .thenBy { it.outcome },
+        )
+        .firstOrNull()
 
 internal fun safeApiFootballOddsRequestSlots(
     maxRequestsPerSync: Int,

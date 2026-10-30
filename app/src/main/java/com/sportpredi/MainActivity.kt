@@ -1640,7 +1640,12 @@ private fun FixtureDetailsScreen(
                 fetchedAt = display.oddsFetchedAt,
             )
             Text(
-                "Ein positiver Modell-EV ist eine Schätzung, keine Garantie für Treffer oder Gewinn.",
+                "Aus passenden Tipps wird zuerst die höchste Modellchance gewählt (mindestens " +
+                    "${percent(ApiFootballTipSelectionRules.MIN_MODEL_PROBABILITY)}); die Quote muss " +
+                    "${ApiFootballTipSelectionRules.MIN_DECIMAL_ODDS.format(2)}–" +
+                    "${ApiFootballTipSelectionRules.MAX_DECIMAL_ODDS.format(2)} betragen. Der EV von " +
+                    "mindestens ${(ApiFootballTipSelectionRules.MIN_EXPECTED_VALUE * 100).format(0)} % ist " +
+                    "Mindestpuffer und Tie-Breaker. Eine Schätzung, keine Garantie für Treffer oder Gewinn.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -1826,11 +1831,12 @@ private fun ApiFootballValueTipSummary(
                 homeProbability == null || drawProbability == null || awayProbability == null ->
                     "Kein Value-Tipp verfügbar: Modellwahrscheinlichkeiten fehlen."
                 else ->
-                    "Kein geeigneter Tipp: Chance mindestens " +
+                    "Kein Tipp erfüllt alle Grenzen: Chance mindestens " +
                         "${percent(ApiFootballTipSelectionRules.MIN_MODEL_PROBABILITY)}, " +
                         "Quote ${ApiFootballTipSelectionRules.MIN_DECIMAL_ODDS.format(2)}–" +
                         "${ApiFootballTipSelectionRules.MAX_DECIMAL_ODDS.format(2)} und Modell-EV mindestens " +
-                        "${(ApiFootballTipSelectionRules.MIN_EXPECTED_VALUE * 100).format(0)} %."
+                        "${(ApiFootballTipSelectionRules.MIN_EXPECTED_VALUE * 100).format(0)} %. " +
+                        "Aus passenden Tipps gewinnt die höchste Modellchance; EV entscheidet bei Gleichstand."
             },
             style = MaterialTheme.typography.bodySmall,
         )
@@ -1860,7 +1866,7 @@ private fun ApiFootballValueTipSummary(
                 quotes == null -> "Gespeicherte Quoten konnten nicht gelesen werden."
                 quotes.isEmpty() -> "Keine unterstützten Quotenmärkte gespeichert."
                 tip == null && homeProbability != null ->
-                    "Keine verfügbare Quote erfüllt die Realismus- und EV-Filter."
+                    "Keine verfügbare Quote erfüllt die Chancen-, Quoten- und EV-Grenzen."
                 else -> "Quotenquelle: API-Football"
             }
             else -> "Quotenstatus unbekannt."
