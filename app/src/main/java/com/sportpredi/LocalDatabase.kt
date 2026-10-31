@@ -137,6 +137,8 @@ data class BacktestRunEntity(
     val validationEndDate: String? = null,
     val selectedDixonColesRho: Double? = null,
     val selectedHalfLifeDays: Double? = null,
+    val selectedEloKFactor: Double? = null,
+    val marketHoldoutMetricsJson: String? = null,
 )
 
 @Entity(
@@ -346,6 +348,9 @@ interface SportPrediDao {
     @Query("SELECT * FROM prediction_snapshots ORDER BY createdAt")
     suspend fun allPredictions(): List<PredictionSnapshotEntity>
 
+    @Query("SELECT * FROM prediction_snapshots WHERE providerFixtureId IN (:fixtureIds) ORDER BY createdAt")
+    suspend fun predictionsForFixtures(fixtureIds: List<Long>): List<PredictionSnapshotEntity>
+
     @Query("SELECT * FROM prediction_evaluations ORDER BY predictionSnapshotId")
     suspend fun allPredictionEvaluations(): List<PredictionEvaluationEntity>
 
@@ -361,6 +366,9 @@ interface SportPrediDao {
     @Query("SELECT * FROM backtest_predictions ORDER BY runId, providerFixtureId, modelVersion")
     suspend fun allBacktestPredictions(): List<BacktestPredictionEntity>
 
+    @Query("SELECT * FROM backtest_predictions WHERE runId = :runId")
+    suspend fun backtestPredictions(runId: Long): List<BacktestPredictionEntity>
+
     @Query("SELECT * FROM sync_metadata WHERE `key` = :key LIMIT 1")
     suspend fun syncMetadata(key: String): SyncMetadataEntity?
 
@@ -375,6 +383,9 @@ interface SportPrediDao {
 
     @Query("SELECT * FROM api_football_odds_cache WHERE providerFixtureId = :fixtureId LIMIT 1")
     suspend fun apiFootballOdds(fixtureId: Long): ApiFootballOddsCacheEntity?
+
+    @Query("SELECT * FROM api_football_odds_cache")
+    suspend fun allApiFootballOdds(): List<ApiFootballOddsCacheEntity>
 
     @Upsert
     suspend fun upsertApiFootballOddsCache(item: ApiFootballOddsCacheEntity)
@@ -470,6 +481,9 @@ interface SportPrediDao {
     @Query("UPDATE backtest_runs SET sampleSize = :sampleSize WHERE id = :runId")
     suspend fun updateBacktestRunSampleSize(runId: Long, sampleSize: Int)
 
+    @Query("UPDATE backtest_runs SET marketHoldoutMetricsJson = :metricsJson WHERE id = :runId")
+    suspend fun updateBacktestRunMarketMetrics(runId: Long, metricsJson: String)
+
     @Query("SELECT * FROM backtest_model_metrics WHERE runId = :runId ORDER BY modelVersion")
     suspend fun backtestMetrics(runId: Long): List<BacktestModelMetricEntity>
 
@@ -527,7 +541,7 @@ interface SportPrediDao {
         ApiFootballStandingsCacheEntity::class,
         ApiFootballOddsCacheEntity::class,
     ],
-    version = 11,
+    version = 13,
     exportSchema = false,
 )
 abstract class SportPrediDatabase : RoomDatabase() {
@@ -554,6 +568,8 @@ abstract class SportPrediDatabase : RoomDatabase() {
                     MIGRATION_8_9,
                     MIGRATION_9_10,
                     MIGRATION_10_11,
+                    MIGRATION_11_12,
+                    MIGRATION_12_13,
                 ).build().also { instance = it }
             }
 
@@ -770,6 +786,20 @@ abstract class SportPrediDatabase : RoomDatabase() {
                     )
                     """.trimIndent(),
                 )
+            }
+        }
+
+        internal val MIGRATION_11_12 = object : Migration(11, 12) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL(
+                    "ALTER TABLE backtest_runs ADD COLUMN marketHoldoutMetricsJson TEXT",
+                )
+            }
+        }
+
+        internal val MIGRATION_12_13 = object : Migration(12, 13) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("ALTER TABLE backtest_runs ADD COLUMN selectedEloKFactor REAL")
             }
         }
     }

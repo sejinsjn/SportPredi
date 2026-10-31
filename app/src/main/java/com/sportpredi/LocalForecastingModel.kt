@@ -11,6 +11,7 @@ import kotlin.math.pow
 data class LocalForecastParameters(
     val halfLifeDays: Double = 365.0,
     val dixonColesRho: Double = 0.0,
+    val eloKFactor: Double = 20.0,
 )
 
 data class ScorelineProbability(
@@ -44,6 +45,7 @@ data class PredictionAnalysis(
     val explanation: String,
     val mostLikelyOutcome: String? = null,
     val mostLikelyOutcomeProbability: Double? = null,
+    val outcomeModelVersion: String? = null,
 )
 
 data class ModelPrediction(
@@ -61,6 +63,102 @@ data class LocalForecastResult(
     val dixonColesModel: ModelPrediction,
     val inputFingerprint: String,
 )
+
+internal fun applyOutcomeProbabilities(
+    analysis: PredictionAnalysis,
+    outcomeProbabilities: DoubleArray,
+    outcomeModelVersion: String,
+): PredictionAnalysis {
+    require(outcomeProbabilities.size == 3)
+    require(outcomeProbabilities.all { it.isFinite() && it >= 0.0 })
+    require(analysis.scoreDistribution.isNotEmpty())
+    val probabilityTotal = outcomeProbabilities.sum()
+    require(probabilityTotal.isFinite() && probabilityTotal > 0.0)
+    val targetProbabilities = DoubleArray(3) { outcomeProbabilities[it] / probabilityTotal }
+    require(analysis.scoreDistribution.all { it.probability.isFinite() && it.probability >= 0.0 })
+    val currentOutcomeMass = DoubleArray(3)
+    analysis.scoreDistribution.forEach { score ->
+        val outcome = when {
+            score.homeGoals > score.awayGoals -> 0
+            score.homeGoals == score.awayGoals -> 1
+            else -> 2
+        }
+        currentOutcomeMass[outcome] += score.probability
+    }
+    require(currentOutcomeMass.all { it.isFinite() && it > 0.0 })
+    val adjustedDistribution = analysis.scoreDistribution.map { score ->
+        val outcome = when {
+            score.homeGoals > score.awayGoals -> 0
+            score.homeGoals == score.awayGoals -> 1
+            else -> 2
+        }
+        score.copy(
+            probability = score.probability *
+                targetProbabilities[outcome] / currentOutcomeMass[outcome],
+        )
+    }
+    val totalScoreMass = adjustedDistribution.sumOf { it.probability }
+    require(totalScoreMass.isFinite() && totalScoreMass > 0.0)
+    val normalizedDistribution = adjustedDistribution.map {
+        it.copy(probability = it.probability / totalScoreMass)
+    }
+    val adjustedOutcomeProbabilities = DoubleArray(3)
+    normalizedDistribution.forEach { score ->
+        val outcome = when {
+            score.homeGoals > score.awayGoals -> 0
+            score.homeGoals == score.awayGoals -> 1
+            else -> 2
+        }
+        adjustedOutcomeProbabilities[outcome] += score.probability
+    }
+    val mostLikelyScore = normalizedDistribution.maxBy { it.probability }
+    val outcomePrediction = mostLikely1X2Prediction(adjustedOutcomeProbabilities)
+    val expectedHomeGoals = normalizedDistribution.sumOf { it.homeGoals * it.probability }
+    val expectedAwayGoals = normalizedDistribution.sumOf { it.awayGoals * it.probability }
+
+    return analysis.copy(
+        scoreDistribution = normalizedDistribution,
+        expectedTotalGoals = expectedHomeGoals + expectedAwayGoals,
+        mostLikelyScore = "${mostLikelyScore.homeGoals}:${mostLikelyScore.awayGoals}",
+        over15Probability = normalizedDistribution
+            .filter { it.homeGoals + it.awayGoals > 1 }
+            .sumOf { it.probability },
+        over25Probability = normalizedDistribution
+            .filter { it.homeGoals + it.awayGoals > 2 }
+            .sumOf { it.probability },
+        over35Probability = normalizedDistribution
+            .filter { it.homeGoals + it.awayGoals > 3 }
+            .sumOf { it.probability },
+        bothTeamsToScoreProbability = normalizedDistribution
+            .filter { it.homeGoals > 0 && it.awayGoals > 0 }
+            .sumOf { it.probability },
+        homeOrDrawProbability = adjustedOutcomeProbabilities[0] + adjustedOutcomeProbabilities[1],
+        drawOrAwayProbability = adjustedOutcomeProbabilities[1] + adjustedOutcomeProbabilities[2],
+        eitherTeamToWinProbability = adjustedOutcomeProbabilities[0] + adjustedOutcomeProbabilities[2],
+        mostLikelyOutcome = outcomePrediction?.selection,
+        mostLikelyOutcomeProbability = outcomePrediction?.probability,
+        outcomeModelVersion = outcomeModelVersion,
+    )
+}
+
+internal fun blendForecastScoreDistributions(
+    teamDistribution: List<ScorelineProbability>,
+    competitionPrior: List<ScorelineProbability>,
+    teamHistoryWeight: Double,
+): List<ScorelineProbability> {
+    require(teamDistribution.size == competitionPrior.size)
+    require(teamHistoryWeight.isFinite() && teamHistoryWeight in 0.0..1.0)
+    require(teamDistribution.indices.all { index ->
+        teamDistribution[index].homeGoals == competitionPrior[index].homeGoals &&
+            teamDistribution[index].awayGoals == competitionPrior[index].awayGoals
+    })
+    return teamDistribution.mapIndexed { index, score ->
+        score.copy(
+            probability = score.probability * teamHistoryWeight +
+                competitionPrior[index].probability * (1.0 - teamHistoryWeight),
+        )
+    }
+}
 
 private data class RecentTeamMatch(
     val date: LocalDate,
@@ -265,7 +363,20 @@ class LocalForecastingState(
             competition.awayWins + allCompetitionEmpirical[2] * COMPETITION_PRIOR_WEIGHT,
         ).let(::normalize)
         val independent = scoreDistribution(expectedHome, expectedAway, rho = 0.0)
-        val corrected = scoreDistribution(expectedHome, expectedAway, parameters.dixonColesRho)
+        val rawCorrected = scoreDistribution(expectedHome, expectedAway, parameters.dixonColesRho)
+        val minEffectiveHistory = minOf(home.effectiveHistoryWeight, away.effectiveHistoryWeight)
+        val teamHistoryWeight = minEffectiveHistory /
+            (minEffectiveHistory + TEAM_PRIOR_WEIGHT)
+        val competitionPrior = scoreDistribution(
+            leagueHomeAverage,
+            leagueAwayAverage,
+            parameters.dixonColesRho,
+        )
+        val corrected = blendForecastScoreDistributions(
+            teamDistribution = rawCorrected,
+            competitionPrior = competitionPrior,
+            teamHistoryWeight = teamHistoryWeight,
+        )
         val independentHomeGoals = expectedGoals(independent, home = true)
         val independentAwayGoals = expectedGoals(independent, home = false)
         val correctedHomeGoals = expectedGoals(corrected, home = true)
@@ -290,7 +401,6 @@ class LocalForecastingState(
         val mostLikelyOutcome = mostLikely1X2Prediction(doubleArrayOf(homeWin, draw, awayWin))
         val homeCount = home.matchCount
         val awayCount = away.matchCount
-        val minEffectiveHistory = minOf(home.effectiveHistoryWeight, away.effectiveHistoryWeight)
         val confidence = when {
             minEffectiveHistory < MINIMUM_HISTORY_MATCHES -> "Sehr begrenzte Datenbasis"
             minEffectiveHistory < 10.0 -> "Begrenzte Datenbasis"
@@ -408,7 +518,7 @@ class LocalForecastingState(
         }
         competition.addMatch(homeGoals, awayGoals)
         allCompetitions.addMatch(homeGoals, awayGoals)
-        val ratingChange = ELO_K_FACTOR * (actualHomePoints - homeExpected)
+        val ratingChange = parameters.eloKFactor * (actualHomePoints - homeExpected)
         home.rating += ratingChange
         away.rating -= ratingChange
         sourceUpdate = maxOf(sourceUpdate.orEmpty(), fixture.updatedAt).ifEmpty { null }
@@ -519,7 +629,7 @@ class LocalForecastingState(
     private fun fingerprint(fixture: FixtureEntity): String = hash(
         "$historyRevision|${fixture.providerFixtureId}|${fixture.competitionCode}|${fixture.matchDate}|${fixture.kickoffAt}|" +
             "${fixture.venue}|${fixture.matchday}|${fixture.stage}|${fixture.homeTeamId}-${fixture.awayTeamId}|" +
-            "${parameters.halfLifeDays}|${parameters.dixonColesRho}",
+            "${parameters.halfLifeDays}|${parameters.dixonColesRho}|${parameters.eloKFactor}",
     )
 
     private fun hash(value: String): String =
@@ -528,7 +638,7 @@ class LocalForecastingState(
             .joinToString("") { "%02x".format(it) }
 
     companion object {
-        const val MODEL_VERSION = "dixon-coles-cross-competition-time-decay-api-football-v6"
+        const val MODEL_VERSION = "dixon-coles-cross-competition-time-decay-api-football-v8"
         const val MINIMUM_HISTORY_MATCHES = 3
         private const val DEFAULT_HOME_GOALS = 1.45
         private const val DEFAULT_AWAY_GOALS = 1.15
@@ -544,11 +654,11 @@ class LocalForecastingState(
         private const val MIN_EXPECTED_GOALS = 0.1
         private const val MAX_EXPECTED_GOALS = 5.0
         private const val MAX_GOALS = 10
-        private const val ELO_K_FACTOR = 20.0
         private const val RECENT_MATCH_LIMIT = 10
         private const val MODEL_EXPLANATION =
             "Zeitgewichtetes Modell mit Teamform aus allen Wettbewerben, wettbewerbsspezifischem " +
                 "Ligamittelwert, gegnerischer Defensivstärke und datenbasiertem Elo-Heimvorteil. " +
-                "Dixon-Coles-Korrektur für niedrige Ergebnisse."
+                "Bei geringer effektiver Teamhistorie wird die Ergebnisverteilung zum Wettbewerbsmittel " +
+                "geglättet. Dixon-Coles-Korrektur für niedrige Ergebnisse."
     }
 }

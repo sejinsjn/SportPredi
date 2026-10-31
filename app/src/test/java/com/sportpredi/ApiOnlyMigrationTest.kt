@@ -8,6 +8,44 @@ import org.junit.Test
 
 class ApiOnlyMigrationTest {
     @Test
+    fun migrationAddsStoredMarketHoldoutMetrics() {
+        val statements = mutableListOf<String>()
+        val database = Proxy.newProxyInstance(
+            SupportSQLiteDatabase::class.java.classLoader,
+            arrayOf(SupportSQLiteDatabase::class.java),
+        ) { _, method, arguments ->
+            if (method.name == "execSQL") statements += arguments?.get(0) as String
+            null
+        } as SupportSQLiteDatabase
+
+        SportPrediDatabase.MIGRATION_11_12.migrate(database)
+
+        assertEquals(
+            listOf("ALTER TABLE backtest_runs ADD COLUMN marketHoldoutMetricsJson TEXT"),
+            statements,
+        )
+    }
+
+    @Test
+    fun migrationAddsSelectedEloLearningRateWithoutDroppingBacktestData() {
+        val statements = mutableListOf<String>()
+        val database = Proxy.newProxyInstance(
+            SupportSQLiteDatabase::class.java.classLoader,
+            arrayOf(SupportSQLiteDatabase::class.java),
+        ) { _, method, arguments ->
+            if (method.name == "execSQL") statements += arguments?.get(0) as String
+            null
+        } as SupportSQLiteDatabase
+
+        SportPrediDatabase.MIGRATION_12_13.migrate(database)
+
+        assertEquals(
+            listOf("ALTER TABLE backtest_runs ADD COLUMN selectedEloKFactor REAL"),
+            statements,
+        )
+    }
+
+    @Test
     fun migrationClearsOnlyRetiredFootballAndPredictionTables() {
         val statements = mutableListOf<String>()
         val database = Proxy.newProxyInstance(

@@ -39,6 +39,51 @@ class LocalForecastingModelTest {
     }
 
     @Test
+    fun selectedOutcomeProbabilitiesRescaleScorelinesWithoutChangingWithinOutcomeShape() {
+        val original = trainedState()
+            .forecast(fixture(100, "2025-02-01", homeId = 1, awayId = 2))
+            .analysis
+        val selected = doubleArrayOf(0.55, 0.20, 0.25)
+        val adjusted = applyOutcomeProbabilities(
+            analysis = original,
+            outcomeProbabilities = selected,
+            outcomeModelVersion = ELO_MODEL_VERSION,
+        )
+        val actualOutcomes = doubleArrayOf(
+            adjusted.scoreDistribution.filter { it.homeGoals > it.awayGoals }.sumOf { it.probability },
+            adjusted.scoreDistribution.filter { it.homeGoals == it.awayGoals }.sumOf { it.probability },
+            adjusted.scoreDistribution.filter { it.homeGoals < it.awayGoals }.sumOf { it.probability },
+        )
+        val selectedHomeScore = original.scoreDistribution.first { it.homeGoals > it.awayGoals }
+        val originalHomeMass = original.scoreDistribution
+            .filter { it.homeGoals > it.awayGoals }
+            .sumOf { it.probability }
+        val adjustedHomeMass = adjusted.scoreDistribution
+            .filter { it.homeGoals > it.awayGoals }
+            .sumOf { it.probability }
+        val adjustedSelectedScore = adjusted.scoreDistribution.first {
+            it.homeGoals == selectedHomeScore.homeGoals && it.awayGoals == selectedHomeScore.awayGoals
+        }
+
+        assertEquals(1.0, adjusted.scoreDistribution.sumOf { it.probability }, 1e-12)
+        selected.indices.forEach { index ->
+            assertEquals(selected[index], actualOutcomes[index], 1e-12)
+        }
+        assertEquals(
+            selectedHomeScore.probability / originalHomeMass,
+            adjustedSelectedScore.probability / adjustedHomeMass,
+            1e-12,
+        )
+        assertEquals(
+            adjusted.scoreDistribution.filter { it.homeGoals + it.awayGoals > 2 }
+                .sumOf { it.probability },
+            adjusted.over25Probability,
+            1e-12,
+        )
+        assertEquals(ELO_MODEL_VERSION, adjusted.outcomeModelVersion)
+    }
+
+    @Test
     fun allMatchesFromOneDateMustBeForecastBeforeTheirResultsAreAdded() {
         val state = LocalForecastingState()
         val sameDay = fixture(10, "2025-01-01", homeId = 1, awayId = 2, homeScore = 2, awayScore = 0)
@@ -119,6 +164,33 @@ class LocalForecastingModelTest {
     }
 
     @Test
+    fun eloKFactorControlsRatingUpdatesAndForecastFingerprint() {
+        val result = fixture(
+            providerId = 1,
+            date = "2025-01-01",
+            homeId = 1,
+            awayId = 2,
+            homeScore = 3,
+            awayScore = 0,
+        )
+        val conservativeState = LocalForecastingState(LocalForecastParameters(eloKFactor = 10.0))
+        val responsiveState = LocalForecastingState(LocalForecastParameters(eloKFactor = 30.0))
+        conservativeState.addCompletedMatch(result)
+        responsiveState.addCompletedMatch(result)
+
+        val upcoming = fixture(2, "2025-01-02", homeId = 1, awayId = 3)
+        val conservative = conservativeState.forecast(upcoming)
+        val responsive = responsiveState.forecast(upcoming)
+
+        assertTrue(responsive.analysis.homeElo > conservative.analysis.homeElo)
+        assertTrue(
+            responsive.eloModel.probabilities[0] >
+                conservative.eloModel.probabilities[0],
+        )
+        assertFalse(responsive.inputFingerprint == conservative.inputFingerprint)
+    }
+
+    @Test
     fun oldResultsLoseInfluenceAndDoNotKeepConfidenceHigh() {
         val state = LocalForecastingState(LocalForecastParameters(halfLifeDays = 1.0))
         state.addCompletedMatch(
@@ -172,6 +244,39 @@ class LocalForecastingModelTest {
         assertTrue(forecast.analysis.scoreDistribution.all { it.probability >= 0.0 })
         assertTrue(forecast.dixonColesModel.expectedHomeGoals in 0.1..5.0)
         assertTrue(forecast.dixonColesModel.expectedAwayGoals in 0.1..5.0)
+    }
+
+    @Test
+    fun sparseTeamHistoryBlendsTowardCompetitionPriorAndTrustsMoreHistoryMore() {
+        val teamDistribution = listOf(
+            ScorelineProbability(0, 0, 0.1),
+            ScorelineProbability(1, 0, 0.9),
+        )
+        val competitionPrior = listOf(
+            ScorelineProbability(0, 0, 0.8),
+            ScorelineProbability(1, 0, 0.2),
+        )
+
+        val noHistory = blendForecastScoreDistributions(
+            teamDistribution,
+            competitionPrior,
+            teamHistoryWeight = 0.0,
+        )
+        val moderateHistory = blendForecastScoreDistributions(
+            teamDistribution,
+            competitionPrior,
+            teamHistoryWeight = 0.5,
+        )
+        val strongHistory = blendForecastScoreDistributions(
+            teamDistribution,
+            competitionPrior,
+            teamHistoryWeight = 0.9,
+        )
+
+        assertEquals(competitionPrior, noHistory)
+        assertEquals(0.55, moderateHistory[1].probability, 1e-12)
+        assertEquals(0.83, strongHistory[1].probability, 1e-12)
+        assertEquals(1.0, moderateHistory.sumOf { it.probability }, 1e-12)
     }
 
     @Test

@@ -61,6 +61,7 @@ import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
+import kotlin.math.sqrt
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -564,6 +565,7 @@ private fun FixturesScreen(
         "Saison" -> currentSeasonEnd
         else -> today.plusDays(6)
     }
+    val topTipsStartDate = if (range == "Morgen") today.plusDays(1) else today
     val fixtures by dao.observeUpcoming(today.toString(), endDate.toString())
         .collectAsState(initial = emptyList())
     var coverageRows by remember { mutableStateOf(emptyList<SeasonCoverageRow>()) }
@@ -650,8 +652,14 @@ private fun FixturesScreen(
                     (fixture.awayTeamName ?: "").contains(teamFilter, ignoreCase = true)
                 )
     }
-    val dailyTopTips = remember(visibleFixtures, today) {
-        selectTopDailyApiFootballValueTips(visibleFixtures, today)
+    val dailyTopTips = remember(visibleFixtures, topTipsStartDate, endDate) {
+        selectTopApiFootballValueTips(visibleFixtures, topTipsStartDate, endDate)
+    }
+    val topTipsPeriodTitle = when (range) {
+        "Heute" -> "heute"
+        "Morgen" -> "morgen"
+        "Saison" -> "diese Saison"
+        else -> "in den nächsten 7 Tagen"
     }
     val openFixture: (FixtureDisplay) -> Unit = { fixture ->
         listScrollPosition = appScrollState.value
@@ -746,7 +754,11 @@ private fun FixturesScreen(
                 )
             }
         }
-        DailyTopTipsSection(dailyTopTips, onFixtureClick = openFixture)
+        DailyTopTipsSection(
+            tips = dailyTopTips,
+            periodTitle = topTipsPeriodTitle,
+            onFixtureClick = openFixture,
+        )
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
@@ -1218,27 +1230,22 @@ private fun FixtureCard(fixture: FixtureDisplay, onClick: () -> Unit) {
     val analysis = remember(fixture.analysisJson) {
         parsePredictionAnalysis(fixture.analysisJson)
     }
-    val outcomePrediction = remember(
+    val forecast = remember(
+        fixture.providerFixtureId,
         fixture.homeWinProbability,
         fixture.drawProbability,
         fixture.awayWinProbability,
+        fixture.oddsQuotesJson,
     ) {
-        if (
-            fixture.homeWinProbability != null &&
-            fixture.drawProbability != null &&
-            fixture.awayWinProbability != null
-        ) {
-            mostLikely1X2Prediction(
-                doubleArrayOf(
-                    fixture.homeWinProbability,
-                    fixture.drawProbability,
-                    fixture.awayWinProbability,
-                ),
-            )
-        } else {
-            null
-        }
+        fixtureForecastDisplay(
+            fixture.providerFixtureId,
+            fixture.homeWinProbability,
+            fixture.drawProbability,
+            fixture.awayWinProbability,
+            fixture.oddsQuotesJson,
+        )
     }
+    val outcomePrediction = forecast?.let { mostLikely1X2Prediction(it.probabilities) }
     val statusLabel = when {
         fixture.status == "CANCELLED" -> "Abgesagt"
         fixture.postponedOrCancelled -> "Verschoben"
@@ -1318,25 +1325,29 @@ private fun FixtureCard(fixture: FixtureDisplay, onClick: () -> Unit) {
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            if (
-                fixture.homeWinProbability != null &&
-                fixture.drawProbability != null &&
-                fixture.awayWinProbability != null
-            ) {
+            if (forecast != null) {
                 HorizontalDivider()
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    ProbabilitySummaryCell("1 · Heimsieg", fixture.homeWinProbability, Modifier.weight(1f))
-                    ProbabilitySummaryCell("X · Remis", fixture.drawProbability, Modifier.weight(1f))
-                    ProbabilitySummaryCell("2 · Auswärts", fixture.awayWinProbability, Modifier.weight(1f))
+                    ProbabilitySummaryCell("1 · Heimsieg", forecast.probabilities[0], Modifier.weight(1f))
+                    ProbabilitySummaryCell("X · Remis", forecast.probabilities[1], Modifier.weight(1f))
+                    ProbabilitySummaryCell("2 · Auswärts", forecast.probabilities[2], Modifier.weight(1f))
                 }
                 outcomePrediction?.let {
                     Text(
-                        "Modellprognose: ${outcomeDisplayLabel(it.selection)} " +
+                        "${if (forecast.marketAdjusted) "Markt-/Modellprognose" else "Modellprognose"}: " +
+                            "${outcomeDisplayLabel(it.selection)} " +
                             "(${percent(it.probability)})",
                         style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                if (forecast.marketAdjusted) {
+                    Text(
+                        "60 % faire Buchmacherchance · 40 % lokales Modell",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
                 if (fixture.expectedHomeGoals != null && fixture.expectedAwayGoals != null) {
@@ -1405,6 +1416,33 @@ private fun ProbabilitySummaryCell(
     }
 }
 
+private data class FixtureForecastDisplay(
+    val probabilities: DoubleArray,
+    val marketAdjusted: Boolean,
+)
+
+private fun fixtureForecastDisplay(
+    fixtureId: Long,
+    homeProbability: Double?,
+    drawProbability: Double?,
+    awayProbability: Double?,
+    oddsQuotesJson: String?,
+): FixtureForecastDisplay? {
+    if (homeProbability == null || drawProbability == null || awayProbability == null) return null
+    val modelProbabilities = doubleArrayOf(homeProbability, drawProbability, awayProbability)
+    val marketAdjusted = marketAdjustedApiFootball1X2Probabilities(
+        fixtureId = fixtureId,
+        homeProbability = homeProbability,
+        drawProbability = drawProbability,
+        awayProbability = awayProbability,
+        quotes = parseApiFootballOddsQuotes(oddsQuotesJson).orEmpty(),
+    )
+    return FixtureForecastDisplay(
+        probabilities = marketAdjusted ?: modelProbabilities,
+        marketAdjusted = marketAdjusted != null,
+    )
+}
+
 private fun parsePredictionAnalysis(json: String?): PredictionAnalysis? =
     try {
         json?.let { Gson().fromJson(it, PredictionAnalysis::class.java) }
@@ -1412,18 +1450,20 @@ private fun parsePredictionAnalysis(json: String?): PredictionAnalysis? =
         null
     }
 
-internal data class DailyValueTipEntry(
+internal data class TopValueTipEntry(
     val fixture: FixtureDisplay,
     val tip: ApiFootballValueTip,
 )
 
-internal fun selectTopDailyApiFootballValueTips(
+internal fun selectTopApiFootballValueTips(
     fixtures: List<FixtureDisplay>,
-    today: LocalDate,
-): List<DailyValueTipEntry> =
-    fixtures.asSequence()
+    startDate: LocalDate,
+    endDate: LocalDate,
+): List<TopValueTipEntry> {
+    val candidates = fixtures.asSequence()
         .filter { fixture ->
-            fixture.matchDate == today.toString() &&
+            fixture.matchDate >= startDate.toString() &&
+                fixture.matchDate <= endDate.toString() &&
                 !fixture.postponedOrCancelled &&
                 fixture.status != "CANCELLED" &&
                 fixture.homeScore == null &&
@@ -1435,29 +1475,72 @@ internal fun selectTopDailyApiFootballValueTips(
             val awayProbability = fixture.awayWinProbability ?: return@mapNotNull null
             val fetchedAt = fixture.oddsFetchedAt ?: return@mapNotNull null
             val quotes = parseApiFootballOddsQuotes(fixture.oddsQuotesJson) ?: return@mapNotNull null
-            val tip = selectBestApiFootballValueTip(
+            rankApiFootballValueTips(
                 quotes = quotes,
                 homeProbability = homeProbability,
                 drawProbability = drawProbability,
                 awayProbability = awayProbability,
                 fetchedAt = fetchedAt,
                 analysis = parsePredictionAnalysis(fixture.analysisJson),
-            ) ?: return@mapNotNull null
-            DailyValueTipEntry(fixture, tip)
+            ).map { tip -> TopValueTipEntry(fixture, tip) }
         }
-        .distinctBy { it.fixture.providerFixtureId }
-        .sortedWith(
-            compareByDescending<DailyValueTipEntry> { it.tip.modelProbability }
-                .thenByDescending { it.tip.expectedValue }
-                .thenBy { it.fixture.kickoffAt.orEmpty() }
-                .thenBy { it.fixture.providerFixtureId },
-        )
-        .take(10)
+        .flatten()
         .toList()
+    return selectDiversifiedTopValueTips(candidates, limit = 10)
+}
+
+internal fun selectDiversifiedTopValueTips(
+    candidates: List<TopValueTipEntry>,
+    limit: Int,
+): List<TopValueTipEntry> {
+    if (limit <= 0) return emptyList()
+    val remaining = candidates
+        .groupBy { it.fixture.providerFixtureId }
+        .mapValuesTo(mutableMapOf()) { (_, fixtureCandidates) ->
+            fixtureCandidates.distinctBy { it.tip.market to it.tip.outcome }
+        }
+    val selected = mutableListOf<TopValueTipEntry>()
+    val exposureCounts = mutableMapOf<String, Int>()
+    while (selected.size < limit && remaining.isNotEmpty()) {
+        val next = remaining.values.asSequence()
+            .flatten()
+            .maxWithOrNull(
+                compareBy<TopValueTipEntry> {
+                    val family = tipExposureFamily(it.tip)
+                    it.tip.qualityScore / sqrt(1.0 + exposureCounts.getOrDefault(family, 0))
+                }
+                    .thenBy { it.tip.qualityScore }
+                    .thenBy { it.tip.selectionProbability }
+                    .thenBy { it.tip.expectedValue }
+                    .thenByDescending { it.fixture.kickoffAt.orEmpty() }
+                    .thenBy { it.fixture.providerFixtureId },
+            ) ?: break
+        selected += next
+        val family = tipExposureFamily(next.tip)
+        exposureCounts[family] = (exposureCounts[family] ?: 0) + 1
+        remaining.remove(next.fixture.providerFixtureId)
+    }
+    return selected.sortedWith(
+        compareByDescending<TopValueTipEntry> { it.tip.qualityScore }
+            .thenByDescending { it.tip.selectionProbability }
+            .thenByDescending { it.tip.expectedValue }
+            .thenBy { it.fixture.kickoffAt.orEmpty() }
+            .thenBy { it.fixture.providerFixtureId },
+    )
+}
+
+private fun tipExposureFamily(tip: ApiFootballValueTip): String =
+    when (tip.market) {
+        "TOTAL_GOALS" -> "TOTAL_GOALS_${tip.outcome.substringBefore('_')}"
+        "BOTH_TEAMS_SCORE" -> "BOTH_TEAMS_SCORE_${tip.outcome}"
+        "1X2", "DOUBLE_CHANCE", "DRAW_NO_BET" -> "RESULT_${tip.outcome}"
+        else -> tip.market
+    }
 
 @Composable
 private fun DailyTopTipsSection(
-    tips: List<DailyValueTipEntry>,
+    tips: List<TopValueTipEntry>,
+    periodTitle: String,
     onFixtureClick: (FixtureDisplay) -> Unit,
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
@@ -1465,18 +1548,19 @@ private fun DailyTopTipsSection(
             modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Text("Top 10 Tipps heute", style = MaterialTheme.typography.titleLarge)
+            Text("Top 10 Tipps $periodTitle", style = MaterialTheme.typography.titleLarge)
             Text(
-                "Nach Modellchance sortiert · mindestens " +
-                    "${percent(ApiFootballTipSelectionRules.MIN_MODEL_PROBABILITY)} Chance · Quote " +
-                    "${ApiFootballTipSelectionRules.MIN_DECIMAL_ODDS.format(2)}–" +
-                    "${ApiFootballTipSelectionRules.MAX_DECIMAL_ODDS.format(2)} · EV mindestens " +
-                    "${(ApiFootballTipSelectionRules.MIN_EXPECTED_VALUE * 100).format(0)} %",
+                "Zeitraum über die Auswahl oben · mindestens 60 % bewertete Gewinnchance und positiver EV · " +
+                    "Chance und Auszahlung werden balanciert; wiederholte Marktrichtungen werden " +
+                    "weich abgewertet, nicht gesperrt.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             if (tips.isEmpty()) {
-                Text("Heute gibt es keine Tipps, die alle Grenzen erfüllen.")
+                Text(
+                    "Für diesen Zeitraum erfüllt kein Tipp gleichzeitig mindestens 60 % " +
+                        "bewertete Gewinnchance und positiven konservativen EV.",
+                )
             } else {
                 tips.forEachIndexed { index, entry ->
                     Row(
@@ -1500,7 +1584,7 @@ private fun DailyTopTipsSection(
                             Text(
                                 "${apiFootballMarketLabel(entry.tip.market, entry.tip.outcome)} · " +
                                     "Quote ${entry.tip.decimalOdds.format(2)} · " +
-                                    "Chance ${percent(entry.tip.modelProbability)} · " +
+                                    "Chance ${percent(entry.tip.selectionProbability)} · " +
                                     "EV +${(entry.tip.expectedValue * 100).format(1)}%",
                                 style = MaterialTheme.typography.bodySmall,
                             )
@@ -1557,31 +1641,27 @@ private fun FixtureDetailsScreen(
     var detailError by remember(display.providerFixtureId) { mutableStateOf<String?>(null) }
     val analysis = remember(display.analysisJson) { parsePredictionAnalysis(display.analysisJson) }
     val analysisInvalid = display.analysisJson != null && analysis == null
-    val outcomePrediction = remember(
+    val forecast = remember(
+        display.providerFixtureId,
         display.homeWinProbability,
         display.drawProbability,
         display.awayWinProbability,
-        analysis?.mostLikelyOutcome,
-        analysis?.mostLikelyOutcomeProbability,
+        display.oddsQuotesJson,
     ) {
-        if (
-            display.homeWinProbability != null &&
-            display.drawProbability != null &&
-            display.awayWinProbability != null
-        ) {
-            mostLikely1X2Prediction(
-                doubleArrayOf(
-                    display.homeWinProbability,
-                    display.drawProbability,
-                    display.awayWinProbability,
-                ),
-            )
-        } else {
+        fixtureForecastDisplay(
+            display.providerFixtureId,
+            display.homeWinProbability,
+            display.drawProbability,
+            display.awayWinProbability,
+            display.oddsQuotesJson,
+        )
+    }
+    val outcomePrediction = forecast?.let { mostLikely1X2Prediction(it.probabilities) }
+        ?: run {
             val outcome = analysis?.mostLikelyOutcome
             val probability = analysis?.mostLikelyOutcomeProbability
             if (outcome != null && probability != null) OutcomePrediction(outcome, probability) else null
         }
-    }
 
     LaunchedEffect(display.providerFixtureId) {
         try {
@@ -1714,25 +1794,45 @@ private fun FixtureDetailsScreen(
             if (analysis == null) {
                 Text("Für dieses Spiel liegt noch keine ausführliche Prognose vor.")
             } else {
-                Text("1X2-Wahrscheinlichkeiten", style = MaterialTheme.typography.labelLarge)
-                if (
-                    display.homeWinProbability != null &&
-                    display.drawProbability != null &&
-                    display.awayWinProbability != null
-                ) {
+                Text(
+                    if (forecast?.marketAdjusted == true) {
+                        "1X2-Wahrscheinlichkeiten · Markt-/Modellprognose"
+                    } else {
+                        "1X2-Wahrscheinlichkeiten · lokales Modell"
+                    },
+                    style = MaterialTheme.typography.labelLarge,
+                )
+                if (forecast != null) {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        ProbabilitySummaryCell("1 · Heimsieg", display.homeWinProbability, Modifier.weight(1f))
-                        ProbabilitySummaryCell("X · Remis", display.drawProbability, Modifier.weight(1f))
-                        ProbabilitySummaryCell("2 · Auswärts", display.awayWinProbability, Modifier.weight(1f))
+                        ProbabilitySummaryCell("1 · Heimsieg", forecast.probabilities[0], Modifier.weight(1f))
+                        ProbabilitySummaryCell("X · Remis", forecast.probabilities[1], Modifier.weight(1f))
+                        ProbabilitySummaryCell("2 · Auswärts", forecast.probabilities[2], Modifier.weight(1f))
                     }
                 }
+                Text(
+                    if (forecast?.marketAdjusted == true) {
+                        "Mit vollständigem 1X2-Markt: 60 % faire Buchmacherchance und 40 % lokales Modell."
+                    } else {
+                        "Ohne vollständigen 1X2-Markt: lokale Modellwahrscheinlichkeit."
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 Text(
                     "Erwartete Tore (Heim : Auswärts): " +
                         "${display.expectedHomeGoals?.format(2) ?: "—"} : " +
                         "${display.expectedAwayGoals?.format(2) ?: "—"}",
                 )
                 Text("Wahrscheinlichstes Ergebnis: ${analysis.mostLikelyScore}")
-                Text("Modell: ${LocalForecastingState.MODEL_VERSION}", style = MaterialTheme.typography.bodySmall)
+                Text(
+                    "1X2-Wahrscheinlichkeitsmodell: " +
+                        "${analysis.outcomeModelVersion ?: LocalForecastingState.MODEL_VERSION}",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Text(
+                    "Torergebnis-Verteilung: ${LocalForecastingState.MODEL_VERSION}",
+                    style = MaterialTheme.typography.bodySmall,
+                )
                 outcomePrediction?.let {
                     Text(
                         "1X2-Modellprognose: ${outcomeDisplayLabel(it.selection)} " +
@@ -1754,12 +1854,15 @@ private fun FixtureDetailsScreen(
                 fetchedAt = display.oddsFetchedAt,
             )
             Text(
-                "Aus passenden Tipps wird zuerst die höchste Modellchance gewählt (mindestens " +
-                    "${percent(ApiFootballTipSelectionRules.MIN_MODEL_PROBABILITY)}); die Quote muss " +
-                    "${ApiFootballTipSelectionRules.MIN_DECIMAL_ODDS.format(2)}–" +
-                    "${ApiFootballTipSelectionRules.MAX_DECIMAL_ODDS.format(2)} betragen. Der EV von " +
-                    "mindestens ${(ApiFootballTipSelectionRules.MIN_EXPECTED_VALUE * 100).format(0)} % ist " +
-                    "Mindestpuffer und Tie-Breaker. Eine Schätzung, keine Garantie für Treffer oder Gewinn.",
+                "Die bewertete Chance kombiniert Modell und faire Buchmacherchance zu gleichen Teilen; " +
+                    "wenn Gegenquoten fehlen, dient die angebotene Quote als Marktvergleich. Berücksichtigt " +
+                    "werden nur Tipps mit mindestens 60 % bewerteter Gewinnchance und positivem " +
+                    "konservativem EV. Die Rangfolge balanciert Chance und " +
+                    "Auszahlung mit einem weichen Score: Die Trefferchance zählt zu 70 %, die begrenzte " +
+                    "Auszahlungsattraktivität zu 30 %. So werden weder sehr kurze Quoten noch Außenseiter " +
+                    "automatisch bevorzugt. Die Quote bleibt dynamisch, die Mindestchance ist 60 %. Bei " +
+                    "Rückzahlung wird die Gewinnchance getrennt von der Push-Chance ausgewiesen. " +
+                    "Eine Schätzung, keine Garantie.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -1945,21 +2048,18 @@ private fun ApiFootballValueTipSummary(
                 homeProbability == null || drawProbability == null || awayProbability == null ->
                     "Kein Value-Tipp verfügbar: Modellwahrscheinlichkeiten fehlen."
                 else ->
-                    "Kein Tipp erfüllt alle Grenzen: Chance mindestens " +
-                        "${percent(ApiFootballTipSelectionRules.MIN_MODEL_PROBABILITY)}, " +
-                        "Quote ${ApiFootballTipSelectionRules.MIN_DECIMAL_ODDS.format(2)}–" +
-                        "${ApiFootballTipSelectionRules.MAX_DECIMAL_ODDS.format(2)} und Modell-EV mindestens " +
-                        "${(ApiFootballTipSelectionRules.MIN_EXPECTED_VALUE * 100).format(0)} %. " +
-                        "Aus passenden Tipps gewinnt die höchste Modellchance; EV entscheidet bei Gleichstand."
+                    "Keine Quote erfüllt gleichzeitig mindestens 60 % bewertete Gewinnchance und " +
+                        "positiven konservativen Erwartungswert."
             },
             style = MaterialTheme.typography.bodySmall,
         )
     } else {
         Text(
             "${apiFootballMarketLabel(tip.market, tip.outcome)} · " +
-                "Quote ${tip.decimalOdds.format(2)} · Modellchance ${percent(tip.modelProbability)}" +
+                "Quote ${tip.decimalOdds.format(2)} · Chance ${percent(tip.selectionProbability)} " +
+                "(Modell ${percent(tip.modelProbability)})" +
                 (if (tip.pushProbability > 0.0) {
-                    " · Remis ${percent(tip.pushProbability)} = Rückzahlung"
+                    " · Push-Chance ${percent(tip.pushProbability)} = Rückzahlung"
                 } else {
                     ""
                 }) + " · " +
@@ -1980,7 +2080,7 @@ private fun ApiFootballValueTipSummary(
                 quotes == null -> "Gespeicherte Quoten konnten nicht gelesen werden."
                 quotes.isEmpty() -> "Keine unterstützten Quotenmärkte gespeichert."
                 tip == null && homeProbability != null ->
-                    "Keine verfügbare Quote erfüllt die Chancen-, Quoten- und EV-Grenzen."
+                    "Keine verfügbare Quote erfüllt mindestens 60 % bewertete Gewinnchance und positiven EV."
                 else -> "Quotenquelle: API-Football"
             }
             else -> "Quotenstatus unbekannt."
@@ -2083,6 +2183,7 @@ private const val HEAD_TO_HEAD_LOOKBACK = 10
 private fun PerformanceScreen(database: SportPrediDatabase) {
     val scope = rememberCoroutineScope()
     var report by remember { mutableStateOf<LocalBacktestReport?>(null) }
+    var historicalTipReport by remember { mutableStateOf<HistoricalTipBacktestReport?>(null) }
     var loading by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
 
@@ -2102,29 +2203,64 @@ private fun PerformanceScreen(database: SportPrediDatabase) {
                         if (latest == null) {
                             null
                         } else {
+                            val models = dao.backtestMetrics(latest.id).map {
+                                LocalModelMetric(
+                                    modelVersion = it.modelVersion,
+                                    sampleSize = it.sampleSize,
+                                    logLoss = it.logLoss,
+                                    brierScore = it.brierScore,
+                                    accuracy = it.accuracy,
+                                    meanAbsoluteGoalError = it.meanAbsoluteGoalError,
+                                    scope = it.scope,
+                                    calibrationError = it.calibrationError,
+                                )
+                            }
+                            val selectedModelVersion = selectValidatedForecastModel(models)
+                            val parsedMarketMetrics = latest.marketHoldoutMetricsJson?.let {
+                                Gson().fromJson(it, Array<MarketMixHoldoutMetric>::class.java).toList()
+                            }.orEmpty()
+                            val hasMarketPriceSweep = parsedMarketMetrics.any {
+                                it.minimumProbability == 0.75 && it.minimumFairOdds == 1.10
+                            }
+                            val savedMarketMetrics = parsedMarketMetrics
+                            val marketMetrics = if (
+                                hasMarketPriceSweep
+                            ) {
+                                savedMarketMetrics
+                            } else {
+                                LocalBacktestEngine(database).refreshMarketHoldoutMetrics(
+                                    runId = latest.id,
+                                    expectedDatasetFingerprint = latest.datasetFingerprint,
+                                    selectedModelVersion = selectedModelVersion,
+                                    trainEndDate = latest.trainEndDate,
+                                    validationEndDate = latest.validationEndDate,
+                                    selectedHalfLifeDays = latest.selectedHalfLifeDays ?: 365.0,
+                                    selectedDixonColesRho = latest.selectedDixonColesRho ?: 0.0,
+                                    selectedEloKFactor = latest.selectedEloKFactor ?: 20.0,
+                                ) ?: savedMarketMetrics
+                            }
                             LocalBacktestReport(
                                 runId = latest.id,
                                 createdAt = latest.createdAt,
                                 sampleSize = latest.sampleSize,
-                                models = dao.backtestMetrics(latest.id).map {
-                                    LocalModelMetric(
-                                        modelVersion = it.modelVersion,
-                                        sampleSize = it.sampleSize,
-                                        logLoss = it.logLoss,
-                                        brierScore = it.brierScore,
-                                        accuracy = it.accuracy,
-                                        meanAbsoluteGoalError = it.meanAbsoluteGoalError,
-                                        scope = it.scope,
-                                        calibrationError = it.calibrationError,
-                                    )
-                                },
+                                models = models,
+                                confidenceFilteredHoldout = confidenceFilteredHoldoutMetrics(
+                                    predictions = dao.backtestPredictions(latest.id),
+                                    selectedModelVersion = selectedModelVersion,
+                                    validationEndDate = latest.validationEndDate,
+                                ),
+                                marketMixHoldout = marketMetrics,
                                 trainEndDate = latest.trainEndDate,
                                 validationEndDate = latest.validationEndDate,
                                 selectedDixonColesRho = latest.selectedDixonColesRho ?: 0.0,
                                 selectedHalfLifeDays = latest.selectedHalfLifeDays ?: 365.0,
+                                selectedEloKFactor = latest.selectedEloKFactor ?: 20.0,
                             )
                         }
                     }
+                }
+                historicalTipReport = withContext(Dispatchers.IO) {
+                    HistoricalTipBacktestEngine(database.sportPrediDao()).run()
                 }
             } catch (exception: Exception) {
                 error = exception.message ?: "Backtest-Daten konnten nicht geladen werden."
@@ -2145,22 +2281,118 @@ private fun PerformanceScreen(database: SportPrediDatabase) {
         Text("Prediction-Qualität", style = MaterialTheme.typography.headlineMedium)
         Text(
             "Chronologischer Walk-forward-Vergleich lokaler Modelle. Alle Spiele eines Datums werden " +
-                "prognostiziert, bevor Ergebnisse dieses Tages einfließen. Halbwertszeit (180/365/730 Tage) " +
-                "und ρ werden auf der Validierung anhand der Accuracy ausgewählt; der spätere Testzeitraum " +
-                "bleibt für diese Auswahl unangetastet. Die Holdout-1X2-Trefferquote zählt die " +
+                "prognostiziert, bevor Ergebnisse dieses Tages einfließen. Halbwertszeit (180/365/730 Tage), " +
+                "ρ und Elo-K-Faktor (10/20/30) werden nur auf der Validierung nach der Trefferquote eines " +
+                "Mehrmarkt-Tipps je Spiel " +
+                "bei Modell-Fairquote ≥1,30 ausgewählt; Log Loss und Brier Score dienen als Tie-Breaker. " +
+                "Das aktive 1X2-Modell wird dort nach Log Loss, dann Brier Score gewählt. Der spätere " +
+                "Testzeitraum bleibt unangetastet. " +
+                "Die Holdout-1X2-Trefferquote zählt die " +
                 "wahrscheinlichste Klasse über alle Testspiele, nicht nur ausgewählte Tipps. 90 % ist ein " +
                 "Zielwert; angezeigt wird der gemessene Wert und die tatsächliche Änderung gegenüber dem " +
-                "alten Modell. Bei weniger als 100 Validierungsprognosen gelten die Standardwerte.",
+                "alten Modell. Bei weniger als 100 qualifizierten Markt-Tipps greifen Log-Loss/Brier als " +
+                "Fallback; bei weniger als 100 Validierungsprognosen gelten die Standardparameter.",
         )
         Button(onClick = { loadOrRun(startNewRun = true) }, enabled = !loading) {
             Text("Backtest lokal starten")
         }
         if (loading) CircularProgressIndicator()
         error?.let { Text("Fehler: $it", color = MaterialTheme.colorScheme.error) }
+        historicalTipReport?.let { tipReport ->
+            Text("Historischer Value-Tipp-Backtest", style = MaterialTheme.typography.titleLarge)
+            Text(
+                "Die aktuelle Tippregel wird rückwirkend auf gespeicherte Prognosen und Quoten angewendet; " +
+                    "das sind nicht zwingend die Tipps, die damals tatsächlich angezeigt wurden. Beide " +
+                    "Snapshots müssen nachweislich vor Anpfiff vorliegen; die Quoten können älter als der " +
+                    "letzte Marktstand sein.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                "Abgeschlossene Spiele: ${tipReport.completedFixtures} · " +
+                    "mit Vorab-Quote: ${tipReport.fixturesWithPrematchOdds} · " +
+                    "mit Vorab-Prognose und Quote auswertbar: ${tipReport.eligibleFixtures}",
+            )
+            val expandedSettledTips = tipReport.expandedWins + tipReport.expandedLosses
+            Text(
+                "Erweiterte Prüfmenge (positiver EV, ohne 60%-Filter): " +
+                    "${tipReport.expandedPositiveEvRecommendations.size} Tipps · " +
+                    "${tipReport.expandedWins} Treffer · ${tipReport.expandedLosses} verloren · " +
+                    "${tipReport.expandedPushes} Push · " +
+                    "Trefferquote ${tipReport.expandedHitRate?.let(::percent) ?: "n/a"} " +
+                    "(n=$expandedSettledTips) · " +
+                    "Ø Chance " +
+                    "${tipReport.expandedAveragePredictedWinProbability?.let(::percent) ?: "n/a"} · " +
+                    "Brier ${tipReport.expandedBrierScore?.format(4) ?: "n/a"} · " +
+                    "Ø EV ${tipReport.expandedAverageExpectedValue?.let(::percent) ?: "n/a"} · " +
+                    "ROI ${tipReport.expandedReturnOnInvestment?.let(::percent) ?: "n/a"}",
+            )
+            Text(
+                "Diese größere Diagnosemenge umfasst auch Tipps unter 60 %; sie ändert die aktive " +
+                    "Mindestchance nicht und ist nicht direkt mit der aktuellen Auswahlliste gleichzusetzen.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (tipReport.recommendations.isEmpty()) {
+                Text(
+                    if (tipReport.eligibleFixtures == 0) {
+                        "Keine abgeschlossenen Spiele mit gespeicherter Vorab-Prognose und Vorab-Quote " +
+                            "gefunden; daraus lässt sich noch keine historische Tippqualität ableiten."
+                    } else {
+                        "Für die auswertbaren Spiele ergab die aktuelle Auswahlregel keinen Tipp mit " +
+                            "positivem erwartetem Wert."
+                    },
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else {
+                val settledTips = tipReport.wins + tipReport.losses
+                Text(
+                    "Tipps: ${tipReport.recommendations.size} · Treffer: ${tipReport.wins} · " +
+                        "Verloren: ${tipReport.losses} · Push: ${tipReport.pushes} · " +
+                        "Trefferquote (ohne Push): ${tipReport.hitRate?.let(::percent) ?: "n/a"} " +
+                        "(n=$settledTips)",
+                )
+                Text(
+                    "Ø vorhergesagte Gewinnchance: " +
+                        "${tipReport.averagePredictedWinProbability?.let(::percent) ?: "n/a"} · " +
+                        "Brier: ${tipReport.brierScore?.format(4) ?: "n/a"} · " +
+                        "Ø Quote: ${tipReport.averageOdds?.format(2) ?: "n/a"} · " +
+                        "Ø geschätzter EV: ${tipReport.averageExpectedValue?.let(::percent) ?: "n/a"}",
+                )
+                Text(
+                    "Realisierter ROI bei 1 Einheit Einsatz je Tipp: " +
+                        "${tipReport.returnOnInvestment?.let(::percent) ?: "n/a"}",
+                    style = MaterialTheme.typography.titleSmall,
+                )
+                if (tipReport.recommendations.size < MIN_HOLDOUT_SAMPLES_FOR_GOAL) {
+                    Text(
+                        "Kleine Stichprobe: unter 30 Tipps ist die Quote/ROI-Angabe nur eine grobe Orientierung.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Text("Die letzten 10 ausgewerteten Empfehlungen:")
+                tipReport.recommendations.take(10).forEach { entry ->
+                    Text(
+                        "${entry.matchDate} · ${entry.homeTeam} ${entry.homeScore}:${entry.awayScore} " +
+                            "${entry.awayTeam} · ${apiFootballMarketLabel(entry.market, entry.outcome)} " +
+                            "@${entry.decimalOdds.format(2)} · Chance " +
+                            "${percent(entry.predictedWinProbability)} · EV " +
+                            "${percent(entry.expectedValue)} · ${entry.result} · " +
+                            "Netto ${"%+.2f".format(entry.profitUnits)}",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+            }
+        }
         if (report == null && !loading && error == null) {
             Text("Noch keine gespeicherten Backtest-Ergebnisse vorhanden.")
         }
         report?.let { result ->
+            val selectedOutcomeModelVersion = selectValidatedForecastModel(result.models)
+            val selectedValidationMetric = result.models.firstOrNull {
+                it.modelVersion == selectedOutcomeModelVersion && it.scope == "validation"
+            }
             Text(
                 "Lauf #${result.runId} · ${formatTimestamp(result.createdAt)} · " +
                     "Prognostizierbare Spiele: ${result.sampleSize}",
@@ -2174,7 +2406,16 @@ private fun PerformanceScreen(database: SportPrediDatabase) {
                         } ?: "nicht separat verfügbar"
                     } · " +
                     "Halbwertszeit=${result.selectedHalfLifeDays.format(0)} Tage · " +
-                        "ρ=${result.selectedDixonColesRho.format(2)}",
+                       "ρ=${result.selectedDixonColesRho.format(2)} · Elo K=${result.selectedEloKFactor.format(0)}",
+            )
+            Text(
+                selectedValidationMetric?.let {
+                    "Aktives Modell für neue 1X2-Prognosen: $selectedOutcomeModelVersion · " +
+                        "Validierung n=${it.sampleSize} · Log Loss ${it.logLoss?.format(4) ?: "n/a"} · " +
+                        "Brier ${it.brierScore?.format(4) ?: "n/a"}. " +
+                        "Der Holdout wird nicht zur Auswahl verwendet."
+                } ?: "Aktives Modell für neue 1X2-Prognosen: $selectedOutcomeModelVersion " +
+                    "(Validierungsstichprobe zu klein; Standardmodell).",
             )
             Text("Holdout-Vergleich zur alten Baseline ($OLD_BACKTEST_BASELINE_MODEL_VERSION)")
             if (result.holdoutComparisons.isEmpty()) {
@@ -2199,6 +2440,71 @@ private fun PerformanceScreen(database: SportPrediDatabase) {
                             "Änderung $change · $targetStatus",
                     )
                 }
+            }
+            Text(
+                "Top-1X2-Auswahl nach Mindestchance im Holdout " +
+                    "($selectedOutcomeModelVersion)",
+            )
+            Text(
+                "Nur der wahrscheinlichste 1X2-Ausgang je Spiel. Die faire Modellquote ist 1/Chance, " +
+                    "keine historische Buchmacherquote; ohne gespeicherte Vorabquoten sind EV und ROI " +
+                    "hier nicht messbar.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            result.confidenceFilteredHoldout.forEach { metric ->
+                val accuracy = metric.accuracy?.let(::percent) ?: "n/a"
+                val meanProbability = metric.meanProbability?.let(::percent) ?: "n/a"
+                val fairOdds = metric.meanFairOdds?.format(2) ?: "n/a"
+                val status = when {
+                    metric.sampleSize < MIN_HOLDOUT_SAMPLES_FOR_GOAL ->
+                        "90% nicht belastbar (zu wenige Tipps)"
+                    metric.accuracy?.let { it >= MODEL_ACCURACY_GOAL } == true ->
+                        "90%-Benchmark erreicht"
+                    else -> "unter 90%"
+                }
+                Text(
+                    "ab ${percent(metric.minimumProbability)} · n=${metric.sampleSize} · " +
+                        "Treffer $accuracy · Ø Modellchance $meanProbability · " +
+                        "Ø faire Modellquote $fairOdds · $status",
+                )
+            }
+            Text("Mehrmarkt-Auswahl nach Wahrscheinlichkeit im Holdout")
+            Text(
+                "Je Spiel wird der wahrscheinlichste Kandidat aus 1X2, Doppelter Chance, Torlinien " +
+                    "und BTTS gewählt. Die Hauptreihe begrenzt die Modell-Fairquote auf mindestens " +
+                    "1,30; Zusatzzeilen vergleichen bei 75/80% Mindestchance niedrigere Fairquoten-" +
+                    "Untergrenzen (1,10/1,15/1,20) als reine Sensitivitätsanalyse. Das sind keine " +
+                    "Buchmacherquoten; EV und ROI sind mangels historischer Vorabquoten nicht messbar.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            if (result.marketMixHoldout.isEmpty()) {
+                Text("Für diesen Lauf fehlen die Mehrmarkt-Metriken; starte den lokalen Backtest neu.")
+            }
+            result.marketMixHoldout.forEach { metric ->
+                val accuracy = metric.accuracy?.let(::percent) ?: "n/a"
+                val fairOdds = metric.meanFairOdds?.format(2) ?: "n/a"
+                val fairOddsFloor = metric.minimumFairOdds?.let {
+                    "Fairquote ≥${it.format(2)}"
+                } ?: "ohne Fairquoten-Untergrenze"
+                val marketMix = metric.marketCounts.entries
+                    .sortedBy { it.key }
+                    .joinToString { (market, count) ->
+                        "${marketLabel(market)} $count"
+                    }
+                    .ifEmpty { "keine Tipps" }
+                val status = when {
+                    metric.sampleSize < MIN_HOLDOUT_SAMPLES_FOR_GOAL ->
+                        "90% nicht belastbar (zu wenige Tipps)"
+                    metric.accuracy?.let { it >= MODEL_ACCURACY_GOAL } == true ->
+                        "90%-Benchmark erreicht"
+                    else -> "unter 90%"
+                }
+                Text(
+                    "ab ${percent(metric.minimumProbability)} · $fairOddsFloor · " +
+                        "n=${metric.sampleSize} · " +
+                        "Treffer $accuracy · Ø faire Modellquote $fairOdds · " +
+                        "$marketMix · $status",
+                )
             }
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 result.models.groupBy { it.scope }.forEach { (scope, metrics) ->
@@ -2230,6 +2536,14 @@ private fun scopeLabel(scope: String): String = when (scope) {
     "validation" -> "Validierung"
     "test" -> "Chronologischer Holdout (Test)"
     else -> "Gesamter Zeitraum (deskriptiv)"
+}
+
+private fun marketLabel(market: String): String = when (market) {
+    "1X2" -> "1X2"
+    "DOUBLE_CHANCE" -> "Doppelte Chance"
+    "TOTAL_GOALS" -> "Tore"
+    "BOTH_TEAMS_SCORE" -> "BTTS"
+    else -> market
 }
 
 private fun Double.format(digits: Int): String = "%.${digits}f".format(this)
