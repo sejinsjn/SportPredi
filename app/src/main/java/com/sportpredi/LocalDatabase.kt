@@ -197,6 +197,7 @@ data class FixtureDisplay(
     val kickoffAt: String?,
     val matchDate: String,
     val status: String,
+    val fullTimeResult: Boolean,
     val postponedOrCancelled: Boolean,
     val rescheduled: Boolean,
     val venue: String?,
@@ -437,7 +438,7 @@ interface SportPrediDao {
     @Query(
         """
         SELECT f.providerFixtureId, f.competitionCode,
-               f.homeTeamId, f.awayTeamId,
+               f.homeTeamId, f.awayTeamId, f.fullTimeResult,
                f.kickoffAt, f.matchDate, f.status,
                f.postponedOrCancelled, f.rescheduled, f.venue, f.matchday,
                c.name AS competitionName, c.country,
@@ -462,11 +463,21 @@ interface SportPrediDao {
             ORDER BY p2.createdAt DESC LIMIT 1
           )
         WHERE f.matchDate BETWEEN :fromDate AND :toDate
-          AND (f.fullTimeResult = 0 OR f.postponedOrCancelled = 1)
         ORDER BY f.matchDate, f.kickoffAt, c.name
         """
     )
-    fun observeUpcoming(fromDate: String, toDate: String): Flow<List<FixtureDisplay>>
+    fun observeFixtures(fromDate: String, toDate: String): Flow<List<FixtureDisplay>>
+
+    @Query(
+        """
+        SELECT * FROM fixtures
+        WHERE providerFixtureId IN (:fixtureIds)
+          AND fullTimeResult = 1
+          AND homeScore IS NOT NULL AND awayScore IS NOT NULL
+          AND postponedOrCancelled = 0
+        """
+    )
+    suspend fun completedFixturesByIds(fixtureIds: List<Long>): List<FixtureEntity>
 
     @Query(
         """

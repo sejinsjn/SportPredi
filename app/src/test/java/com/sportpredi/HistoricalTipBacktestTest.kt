@@ -86,7 +86,7 @@ class HistoricalTipBacktestTest {
     }
 
     @Test
-    fun treatsExactIntegerGoalLineAsPushInHistoricalResults() {
+    fun excludesIntegerGoalLinesFromHistoricalRecommendations() {
         val fixture = fixture(6, "2025-02-02T18:00:00Z", homeScore = 2, awayScore = 2)
         val report = evaluateHistoricalApiFootballTips(
             fixtures = listOf(fixture),
@@ -104,11 +104,34 @@ class HistoricalTipBacktestTest {
             ),
         )
 
-        assertEquals(1, report.pushes)
+        assertEquals(0, report.pushes)
         assertEquals(0, report.wins)
         assertEquals(0, report.losses)
-        assertEquals("PUSH", report.recommendations.single().result)
-        assertEquals(0.0, report.returnOnInvestment!!, 0.0)
+        assertTrue(report.recommendations.isEmpty())
+        assertTrue(report.expandedPositiveEvRecommendations.isEmpty())
+    }
+
+    @Test
+    fun evaluatesHalfGoalTipAgainstTheFinishedScore() {
+        val report = evaluateHistoricalApiFootballTips(
+            fixtures = listOf(fixture(9, "2025-02-02T18:00:00Z", homeScore = 2, awayScore = 1)),
+            predictions = listOf(
+                prediction(9, "2025-02-01T10:00:00Z").copy(
+                    analysisJson = Gson().toJson(goalAnalysis()),
+                ),
+            ),
+            oddsSnapshots = listOf(
+                oddsSnapshot(
+                    9,
+                    "2025-02-01T11:00:00Z",
+                    listOf(ApiFootballOddsQuote(9, "TOTAL_GOALS", "UNDER_3.5", 1.5, "Book A")),
+                ),
+            ),
+        )
+
+        assertEquals(1, report.wins)
+        assertEquals(0, report.losses)
+        assertEquals("UNDER_3.5", report.recommendations.single().outcome)
     }
 
     @Test

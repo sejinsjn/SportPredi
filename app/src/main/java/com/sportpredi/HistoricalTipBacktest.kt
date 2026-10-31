@@ -325,6 +325,6 @@ private fun Int.toDoubleOrNullRatio(denominator: Int): Double? =
 private fun Double.toDoubleOrNullRatio(denominator: Int): Double? =
     if (denominator == 0) null else this / denominator
 
-private const val RESULT_WIN = "WIN"
-private const val RESULT_PUSH = "PUSH"
-private const val RESULT_LOSS = "LOSS"
+internal const val RESULT_WIN = "WIN"
+internal const val RESULT_PUSH = "PUSH"
+internal const val RESULT_LOSS = "LOSS"

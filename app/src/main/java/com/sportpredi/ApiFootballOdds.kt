@@ -6,7 +6,6 @@ import java.time.Instant
 import java.time.LocalDate
 import kotlin.math.abs
 import kotlin.math.pow
-import kotlin.math.roundToInt
 
 internal data class ApiFootballOddsQuote(
     val fixtureId: Long,
@@ -178,7 +177,7 @@ private fun normalizeOddsOutcome(market: String, value: String?): String? {
             val line = match.groupValues[2].replace(',', '.').toDoubleOrNull()
                 ?.takeIf { it.isFinite() && it >= 0.0 }
                 ?: return null
-            if (abs(line * 2.0 - (line * 2.0).roundToInt()) > 1e-9) return null
+            if (abs(line % 1.0 - 0.5) > 1e-9) return null
             "${match.groupValues[1].uppercase()}_$line"
         }
         "BOTH_TEAMS_SCORE" -> when (normalized) {
@@ -208,6 +207,7 @@ internal fun rankApiFootballValueTips(
     val bestPriceByOutcome = quotes.asSequence()
         .filter { it.fixtureId > 0 && it.decimalOdds.isFinite() && it.decimalOdds > 1.0 }
         .filter { it.bookmaker.isNotBlank() }
+        .filter { it.market != "TOTAL_GOALS" || isHalfGoalTotalOutcome(it.outcome) }
         .groupBy { MarketOutcome(it.market, it.outcome) }
         .mapValues { (_, candidates) ->
             candidates.sortedWith(
@@ -269,6 +269,12 @@ internal fun rankApiFootballValueTips(
             .thenByDescending { it.expectedValue }
             .thenBy { it.outcome },
     )
+}
+
+private fun isHalfGoalTotalOutcome(outcome: String): Boolean {
+    if (!outcome.startsWith("OVER_") && !outcome.startsWith("UNDER_")) return false
+    val line = outcome.substringAfter('_').toDoubleOrNull() ?: return false
+    return line.isFinite() && line >= 0.0 && abs(line % 1.0 - 0.5) <= 1e-9
 }
 
 internal fun parseApiFootballOddsQuotes(json: String?): List<ApiFootballOddsQuote>? {
