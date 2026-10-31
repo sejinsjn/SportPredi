@@ -147,7 +147,8 @@ private fun AppScreen(database: SportPrediDatabase) {
                 }
                 lastUpdated = report.completedAt
                 syncMessage = if (report.wasThrottled) {
-                    "API-Football-Anfrage wegen des lokalen Cooldowns ausgelassen."
+                    "Automatische API-Football-Abfrage wegen des lokalen 15-Minuten-Cooldowns " +
+                        "ausgelassen; manuelles Aktualisieren umgeht diesen Schutz."
                 } else {
                     "${report.competitionsChecked} API-Football-Wettbewerbe; " +
                         "${report.fixturesImported} Spiele; ${report.requestsUsed}/" +
@@ -211,7 +212,8 @@ private fun AppScreen(database: SportPrediDatabase) {
                 LocalPredictionEngine(dao).refreshUpcomingPredictions()
             }
             syncMessage = if (report.wasThrottled) {
-                "API-Football-Abfrage wegen des lokalen Cooldowns ausgelassen."
+                "Automatische API-Football-Abfrage wegen des lokalen 15-Minuten-Cooldowns " +
+                    "ausgelassen; manuelles Aktualisieren umgeht diesen Schutz."
             } else if (report.requestsUsed == 0 && report.errors.isEmpty()) {
                 "API-Football-Daten sind aktuell."
             } else {
@@ -2304,7 +2306,9 @@ private fun PerformanceScreen(database: SportPrediDatabase) {
                 "Die aktuelle Tippregel wird rückwirkend auf gespeicherte Prognosen und Quoten angewendet; " +
                     "das sind nicht zwingend die Tipps, die damals tatsächlich angezeigt wurden. Beide " +
                     "Snapshots müssen nachweislich vor Anpfiff vorliegen; die Quoten können älter als der " +
-                    "letzte Marktstand sein.",
+                    "letzte Marktstand sein. Neue Quotenstände werden dauerhaft archiviert; für ältere " +
+                    "Spiele lässt sich nur der beim Datenbank-Update vorhandene letzte Cache-Stand übernehmen, " +
+                    "nicht nachträglich fehlende Vorabquoten rekonstruieren.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
