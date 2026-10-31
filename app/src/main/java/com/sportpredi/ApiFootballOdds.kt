@@ -5,6 +5,7 @@ import java.time.Duration
 import java.time.Instant
 import java.time.LocalDate
 import kotlin.math.abs
+import kotlin.math.pow
 import kotlin.math.roundToInt
 
 internal data class ApiFootballOddsQuote(
@@ -25,8 +26,10 @@ internal data class ApiFootballValueTip(
     val outcome: String,
     val decimalOdds: Double,
     val modelProbability: Double,
+    val selectionProbability: Double,
     val pushProbability: Double,
     val expectedValue: Double,
+    val qualityScore: Double,
     val bookmaker: String,
     val fetchedAt: String,
 )
@@ -40,10 +43,39 @@ private data class ModelMarketProbability(
 private data class MarketOutcome(val market: String, val outcome: String)
 
 internal object ApiFootballTipSelectionRules {
-    const val MIN_MODEL_PROBABILITY = 0.75
-    const val MIN_DECIMAL_ODDS = 1.30
-    const val MAX_DECIMAL_ODDS = 1.80
-    const val MIN_EXPECTED_VALUE = 0.03
+    const val MODEL_PROBABILITY_WEIGHT = 0.5
+    const val PROBABILITY_QUALITY_WEIGHT = 0.70
+    const val FORECAST_MARKET_PROBABILITY_WEIGHT = 0.60
+    const val MINIMUM_SELECTION_PROBABILITY = 0.60
+}
+
+internal fun marketAdjustedApiFootball1X2Probabilities(
+    fixtureId: Long,
+    homeProbability: Double,
+    drawProbability: Double,
+    awayProbability: Double,
+    quotes: List<ApiFootballOddsQuote>,
+): DoubleArray? {
+    val modelProbabilities = doubleArrayOf(homeProbability, drawProbability, awayProbability)
+    if (
+        fixtureId <= 0 ||
+        modelProbabilities.any { !it.isFinite() || it !in 0.0..1.0 } ||
+        abs(modelProbabilities.sum() - 1.0) > 0.01
+    ) return null
+
+    val marketProbabilities = averageNoVigMarketProbabilities(
+        quotes = quotes,
+        fixtureId = fixtureId,
+        market = "1X2",
+        outcomes = listOf("HOME", "DRAW", "AWAY"),
+    ) ?: return null
+    val marketWeight = ApiFootballTipSelectionRules.FORECAST_MARKET_PROBABILITY_WEIGHT
+    val modelWeight = 1.0 - marketWeight
+    return doubleArrayOf(
+        modelProbabilities[0] * modelWeight + marketProbabilities.getValue("HOME") * marketWeight,
+        modelProbabilities[1] * modelWeight + marketProbabilities.getValue("DRAW") * marketWeight,
+        modelProbabilities[2] * modelWeight + marketProbabilities.getValue("AWAY") * marketWeight,
+    )
 }
 
 internal fun apiFootballMarketLabel(market: String, outcome: String): String =
@@ -170,7 +202,9 @@ internal fun rankApiFootballValueTips(
     awayProbability: Double,
     fetchedAt: String,
     analysis: PredictionAnalysis? = null,
+    minimumSelectionProbability: Double = ApiFootballTipSelectionRules.MINIMUM_SELECTION_PROBABILITY,
 ): List<ApiFootballValueTip> {
+    require(minimumSelectionProbability.isFinite() && minimumSelectionProbability in 0.0..1.0)
     val bestPriceByOutcome = quotes.asSequence()
         .filter { it.fixtureId > 0 && it.decimalOdds.isFinite() && it.decimalOdds > 1.0 }
         .filter { it.bookmaker.isNotBlank() }
@@ -196,23 +230,43 @@ internal fun rankApiFootballValueTips(
             probability.push !in 0.0..1.0 ||
             probability.win + probability.loss + probability.push > 1.000001
         ) return@mapNotNull null
-        val expectedValue = probability.win * (quote.decimalOdds - 1.0) - probability.loss
-        if (!expectedValue.isFinite() || expectedValue <= 0.0) return@mapNotNull null
         val nonPushProbability = probability.win + probability.loss
         if (nonPushProbability <= 0.0) return@mapNotNull null
+        val conditionalModelProbability = probability.win / nonPushProbability
+        val marketProbability = marketProbabilityForQuote(quote, quotes)
+        val selectionConditionalProbability = (
+            conditionalModelProbability * ApiFootballTipSelectionRules.MODEL_PROBABILITY_WEIGHT +
+                marketProbability * (1.0 - ApiFootballTipSelectionRules.MODEL_PROBABILITY_WEIGHT)
+            ).coerceIn(0.0, 1.0)
+        val selectionWinProbability = nonPushProbability * selectionConditionalProbability
+        val selectionLossProbability = nonPushProbability * (1.0 - selectionConditionalProbability)
+        if (selectionWinProbability < minimumSelectionProbability) {
+            return@mapNotNull null
+        }
+        val expectedValue =
+            selectionWinProbability * (quote.decimalOdds - 1.0) - selectionLossProbability
+        if (!expectedValue.isFinite() || expectedValue <= 0.0) return@mapNotNull null
+        val nonLossProbability = (selectionWinProbability + probability.push).coerceIn(0.0, 1.0)
+        val payoutAttractiveness = 1.0 - 1.0 / quote.decimalOdds
+        val qualityScore = nonLossProbability.pow(ApiFootballTipSelectionRules.PROBABILITY_QUALITY_WEIGHT) *
+            payoutAttractiveness.pow(1.0 - ApiFootballTipSelectionRules.PROBABILITY_QUALITY_WEIGHT)
+        if (!qualityScore.isFinite() || qualityScore <= 0.0) return@mapNotNull null
         ApiFootballValueTip(
             market = quote.market,
             outcome = quote.outcome,
             decimalOdds = quote.decimalOdds,
             modelProbability = probability.win,
+            selectionProbability = selectionWinProbability,
             pushProbability = probability.push,
             expectedValue = expectedValue,
+            qualityScore = qualityScore,
             bookmaker = quote.bookmaker,
             fetchedAt = fetchedAt,
         )
     }.sortedWith(
-        compareByDescending<ApiFootballValueTip> { it.expectedValue }
-            .thenByDescending { it.decimalOdds }
+        compareByDescending<ApiFootballValueTip> { it.qualityScore }
+            .thenByDescending { it.selectionProbability }
+            .thenByDescending { it.expectedValue }
             .thenBy { it.outcome },
     )
 }
@@ -307,12 +361,19 @@ private fun modelProbabilityForQuote(
                 .filter { it.homeGoals + it.awayGoals > line }
                 .sumOf { it.probability }
                 .coerceIn(0.0, 1.0)
-            val winProbability = when (side) {
-                "OVER" -> overProbability
-                "UNDER" -> 1.0 - overProbability
+            val underProbability = distribution
+                .filter { it.homeGoals + it.awayGoals < line }
+                .sumOf { it.probability }
+                .coerceIn(0.0, 1.0)
+            val pushProbability = distribution
+                .filter { (it.homeGoals + it.awayGoals).toDouble() == line }
+                .sumOf { it.probability }
+                .coerceIn(0.0, 1.0)
+            when (side) {
+                "OVER" -> ModelMarketProbability(overProbability, underProbability, pushProbability)
+                "UNDER" -> ModelMarketProbability(underProbability, overProbability, pushProbability)
                 else -> return null
             }
-            ModelMarketProbability(winProbability, 1.0 - winProbability)
         }
         "BOTH_TEAMS_SCORE" -> {
             val yesProbability = analysis?.bothTeamsToScoreProbability ?: return null
@@ -332,6 +393,137 @@ private fun modelProbabilityForQuote(
     }
 }
 
+private fun marketProbabilityForQuote(
+    quote: ApiFootballOddsQuote,
+    quotes: List<ApiFootballOddsQuote>,
+): Double {
+    val probabilityFromMarket = when (quote.market) {
+        "1X2" -> averageNoVigMarketProbabilities(
+            quotes = quotes,
+            fixtureId = quote.fixtureId,
+            market = "1X2",
+            outcomes = listOf("HOME", "DRAW", "AWAY"),
+        )?.get(quote.outcome)
+        "DOUBLE_CHANCE" -> {
+            val oneXTwo = averageNoVigMarketProbabilities(
+                quotes = quotes,
+                fixtureId = quote.fixtureId,
+                market = "1X2",
+                outcomes = listOf("HOME", "DRAW", "AWAY"),
+            )
+            when (quote.outcome) {
+                "HOME_DRAW" -> oneXTwo?.let { it.getValue("HOME") + it.getValue("DRAW") }
+                "HOME_AWAY" -> oneXTwo?.let { it.getValue("HOME") + it.getValue("AWAY") }
+                "DRAW_AWAY" -> oneXTwo?.let { it.getValue("DRAW") + it.getValue("AWAY") }
+                else -> null
+            }
+        }
+        "TOTAL_GOALS" -> {
+            val (side, line) = quote.outcome.split("_", limit = 2).let {
+                it.getOrNull(0).orEmpty() to it.getOrNull(1).orEmpty()
+            }
+            val opposite = when (side) {
+                "OVER" -> "UNDER_$line"
+                "UNDER" -> "OVER_$line"
+                else -> null
+            }
+            opposite?.let {
+                averageNoVigMarketProbability(
+                    quotes = quotes,
+                    fixtureId = quote.fixtureId,
+                    market = quote.market,
+                    outcomes = listOf(quote.outcome, it),
+                    selectedOutcome = quote.outcome,
+                )
+            }
+        }
+        "BOTH_TEAMS_SCORE" -> {
+            val opposite = when (quote.outcome) {
+                "YES" -> "NO"
+                "NO" -> "YES"
+                else -> null
+            }
+            opposite?.let {
+                averageNoVigMarketProbability(
+                    quotes = quotes,
+                    fixtureId = quote.fixtureId,
+                    market = quote.market,
+                    outcomes = listOf(quote.outcome, it),
+                    selectedOutcome = quote.outcome,
+                )
+            }
+        }
+        "DRAW_NO_BET" -> {
+            val opposite = when (quote.outcome) {
+                "HOME" -> "AWAY"
+                "AWAY" -> "HOME"
+                else -> null
+            }
+            opposite?.let {
+                averageNoVigMarketProbability(
+                    quotes = quotes,
+                    fixtureId = quote.fixtureId,
+                    market = quote.market,
+                    outcomes = listOf(quote.outcome, it),
+                    selectedOutcome = quote.outcome,
+                )
+            }
+        }
+        else -> null
+    }
+    return probabilityFromMarket?.takeIf { it.isFinite() && it in 0.0..1.0 }
+        ?: 1.0 / quote.decimalOdds
+}
+
+private fun averageNoVigMarketProbabilities(
+    quotes: List<ApiFootballOddsQuote>,
+    fixtureId: Long,
+    market: String,
+    outcomes: List<String>,
+): Map<String, Double>? {
+    val probabilitySamples = outcomes.associateWith { mutableListOf<Double>() }
+    quotes.asSequence()
+        .filter {
+            it.fixtureId == fixtureId &&
+                it.market == market &&
+                it.outcome in outcomes &&
+                it.decimalOdds.isFinite() &&
+                it.decimalOdds > 1.0 &&
+                it.bookmaker.isNotBlank()
+        }
+        .groupBy { it.bookmaker.trim().lowercase() }
+        .values
+        .forEach { bookmakerQuotes ->
+            val impliedProbabilities = bookmakerQuotes
+                .groupBy { it.outcome }
+                .mapValues { (_, outcomeQuotes) ->
+                    1.0 / outcomeQuotes.maxOf { it.decimalOdds }
+                }
+            if (impliedProbabilities.keys != outcomes.toSet()) return@forEach
+            val overround = impliedProbabilities.values.sum()
+            if (!overround.isFinite() || overround <= 0.0) return@forEach
+            impliedProbabilities.forEach { (outcome, probability) ->
+                probabilitySamples.getValue(outcome).add(probability / overround)
+            }
+        }
+
+    if (probabilitySamples.values.any { it.isEmpty() }) return null
+    return probabilitySamples.mapValues { (_, samples) -> samples.average() }
+}
+
+private fun averageNoVigMarketProbability(
+    quotes: List<ApiFootballOddsQuote>,
+    fixtureId: Long,
+    market: String,
+    outcomes: List<String>,
+    selectedOutcome: String,
+): Double? = averageNoVigMarketProbabilities(
+    quotes = quotes,
+    fixtureId = fixtureId,
+    market = market,
+    outcomes = outcomes,
+)?.get(selectedOutcome)
+
 internal fun selectBestApiFootballValueTip(
     quotes: List<ApiFootballOddsQuote>,
     homeProbability: Double,
@@ -339,27 +531,18 @@ internal fun selectBestApiFootballValueTip(
     awayProbability: Double,
     fetchedAt: String,
     analysis: PredictionAnalysis? = null,
-): ApiFootballValueTip? =
-    rankApiFootballValueTips(
+    minimumSelectionProbability: Double = ApiFootballTipSelectionRules.MINIMUM_SELECTION_PROBABILITY,
+): ApiFootballValueTip? {
+    return rankApiFootballValueTips(
         quotes = quotes,
         homeProbability = homeProbability,
         drawProbability = drawProbability,
         awayProbability = awayProbability,
         fetchedAt = fetchedAt,
         analysis = analysis,
-    ).asSequence()
-        .filter { tip ->
-            tip.modelProbability >= ApiFootballTipSelectionRules.MIN_MODEL_PROBABILITY &&
-                tip.decimalOdds in ApiFootballTipSelectionRules.MIN_DECIMAL_ODDS..ApiFootballTipSelectionRules.MAX_DECIMAL_ODDS &&
-                tip.expectedValue >= ApiFootballTipSelectionRules.MIN_EXPECTED_VALUE
-        }
-        .sortedWith(
-            compareByDescending<ApiFootballValueTip> { it.modelProbability }
-                .thenByDescending { it.expectedValue }
-                .thenByDescending { it.decimalOdds }
-                .thenBy { it.outcome },
-        )
-        .firstOrNull()
+        minimumSelectionProbability = minimumSelectionProbability,
+    ).firstOrNull()
+}
 
 internal fun safeApiFootballOddsRequestSlots(
     maxRequestsPerSync: Int,

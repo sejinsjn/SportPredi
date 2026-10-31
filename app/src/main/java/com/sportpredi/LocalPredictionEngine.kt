@@ -18,9 +18,26 @@ class LocalPredictionEngine(private val dao: SportPrediDao) {
             .filter { it.fullTimeResult && it.homeScore != null && it.awayScore != null }
             .sortedWith(compareBy<FixtureEntity>({ it.matchDate }, { it.kickoffAt.orEmpty() }))
         val latestBacktest = dao.latestBacktest()
+        val selectedOutcomeModelVersion = latestBacktest?.let { run ->
+            selectValidatedForecastModel(
+                dao.backtestMetrics(run.id).map { metric ->
+                    LocalModelMetric(
+                        modelVersion = metric.modelVersion,
+                        sampleSize = metric.sampleSize,
+                        logLoss = metric.logLoss,
+                        brierScore = metric.brierScore,
+                        accuracy = metric.accuracy,
+                        meanAbsoluteGoalError = metric.meanAbsoluteGoalError,
+                        scope = metric.scope,
+                        calibrationError = metric.calibrationError,
+                    )
+                },
+            )
+        } ?: LocalForecastingState.MODEL_VERSION
         val parameters = LocalForecastParameters(
             halfLifeDays = latestBacktest?.selectedHalfLifeDays ?: 365.0,
             dixonColesRho = latestBacktest?.selectedDixonColesRho ?: 0.0,
+            eloKFactor = latestBacktest?.selectedEloKFactor ?: 20.0,
         )
         val state = LocalForecastingState(parameters)
         var created = 0
@@ -33,7 +50,18 @@ class LocalPredictionEngine(private val dao: SportPrediDao) {
             }
             fixtures.forEach { fixture ->
                 val forecast = state.forecast(fixture)
-                val probabilities = forecast.dixonColesModel.probabilities
+                val selectedForecast = when (selectedOutcomeModelVersion) {
+                    OLD_BACKTEST_BASELINE_MODEL_VERSION -> forecast.existingModel
+                    EMPIRICAL_MODEL_VERSION -> forecast.empiricalBaseline
+                    ELO_MODEL_VERSION -> forecast.eloModel
+                    POISSON_MODEL_VERSION -> forecast.poissonModel
+                    else -> forecast.dixonColesModel
+                }
+                val analysis = applyOutcomeProbabilities(
+                    analysis = forecast.analysis,
+                    outcomeProbabilities = selectedForecast.probabilities,
+                    outcomeModelVersion = selectedOutcomeModelVersion,
+                )
                 val row = PredictionSnapshotEntity(
                     providerFixtureId = fixture.providerFixtureId,
                     createdAt = Instant.now().toString(),
@@ -41,14 +69,20 @@ class LocalPredictionEngine(private val dao: SportPrediDao) {
                     inputFingerprint = buildString {
                         append(forecast.inputFingerprint)
                         append("|prediction-scope:all-1x2-outcomes")
+                        append("|selected-outcome-model:")
+                        append(selectedOutcomeModelVersion)
                     },
-                    homeWinProbability = probabilities[0],
-                    drawProbability = probabilities[1],
-                    awayWinProbability = probabilities[2],
-                    expectedHomeGoals = forecast.dixonColesModel.expectedHomeGoals,
-                    expectedAwayGoals = forecast.dixonColesModel.expectedAwayGoals,
-                    modelVersion = LocalForecastingState.MODEL_VERSION,
-                    analysisJson = gson.toJson(forecast.analysis),
+                    homeWinProbability = selectedForecast.probabilities[0],
+                    drawProbability = selectedForecast.probabilities[1],
+                    awayWinProbability = selectedForecast.probabilities[2],
+                    expectedHomeGoals = analysis.scoreDistribution.sumOf {
+                        it.homeGoals * it.probability
+                    },
+                    expectedAwayGoals = analysis.scoreDistribution.sumOf {
+                        it.awayGoals * it.probability
+                    },
+                    modelVersion = MODEL_VERSION,
+                    analysisJson = gson.toJson(analysis),
                 )
                 if (dao.insertPrediction(row) != -1L) created += 1
             }
@@ -61,6 +95,6 @@ class LocalPredictionEngine(private val dao: SportPrediDao) {
     }
 
     companion object {
-        const val MODEL_VERSION = LocalForecastingState.MODEL_VERSION
+        const val MODEL_VERSION = "validation-selected-scoreline-v1"
     }
 }
