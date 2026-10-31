@@ -13,6 +13,7 @@ import androidx.room.PrimaryKey
 import androidx.room.Query
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.Transaction
 import androidx.room.Upsert
 import androidx.room.ColumnInfo
 import kotlinx.coroutines.flow.Flow
@@ -127,6 +128,17 @@ data class ApiFootballOddsCacheEntity(
     val fetchedAt: String,
 )
 
+@Entity(
+    tableName = "api_football_odds_snapshots",
+    primaryKeys = ["providerFixtureId", "fetchedAt"],
+)
+data class ApiFootballOddsSnapshotEntity(
+    val providerFixtureId: Long,
+    val fetchedAt: String,
+    val quotesJson: String,
+    val status: String,
+)
+
 @Entity(tableName = "backtest_runs")
 data class BacktestRunEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
@@ -185,6 +197,7 @@ data class FixtureDisplay(
     val kickoffAt: String?,
     val matchDate: String,
     val status: String,
+    val fullTimeResult: Boolean,
     val postponedOrCancelled: Boolean,
     val rescheduled: Boolean,
     val venue: String?,
@@ -390,10 +403,42 @@ interface SportPrediDao {
     @Upsert
     suspend fun upsertApiFootballOddsCache(item: ApiFootballOddsCacheEntity)
 
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertApiFootballOddsCache(items: List<ApiFootballOddsCacheEntity>)
+
+    @Query("SELECT * FROM api_football_odds_snapshots")
+    suspend fun allApiFootballOddsSnapshots(): List<ApiFootballOddsSnapshotEntity>
+
+    @Query(
+        "SELECT * FROM api_football_odds_snapshots " +
+            "WHERE providerFixtureId IN (:fixtureIds) ORDER BY providerFixtureId, fetchedAt",
+    )
+    suspend fun apiFootballOddsSnapshotsForFixtures(
+        fixtureIds: List<Long>,
+    ): List<ApiFootballOddsSnapshotEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertApiFootballOddsSnapshots(items: List<ApiFootballOddsSnapshotEntity>)
+
+    @Transaction
+    suspend fun saveApiFootballOddsSnapshot(
+        cache: ApiFootballOddsCacheEntity,
+        snapshot: ApiFootballOddsSnapshotEntity,
+    ) {
+        upsertApiFootballOddsCache(cache)
+        insertApiFootballOddsSnapshots(listOf(snapshot))
+    }
+
+    @Query("DELETE FROM api_football_odds_cache")
+    suspend fun clearApiFootballOddsCache()
+
+    @Query("DELETE FROM api_football_odds_snapshots")
+    suspend fun clearApiFootballOddsSnapshots()
+
     @Query(
         """
         SELECT f.providerFixtureId, f.competitionCode,
-               f.homeTeamId, f.awayTeamId,
+               f.homeTeamId, f.awayTeamId, f.fullTimeResult,
                f.kickoffAt, f.matchDate, f.status,
                f.postponedOrCancelled, f.rescheduled, f.venue, f.matchday,
                c.name AS competitionName, c.country,
@@ -418,11 +463,21 @@ interface SportPrediDao {
             ORDER BY p2.createdAt DESC LIMIT 1
           )
         WHERE f.matchDate BETWEEN :fromDate AND :toDate
-          AND (f.fullTimeResult = 0 OR f.postponedOrCancelled = 1)
         ORDER BY f.matchDate, f.kickoffAt, c.name
         """
     )
-    fun observeUpcoming(fromDate: String, toDate: String): Flow<List<FixtureDisplay>>
+    fun observeFixtures(fromDate: String, toDate: String): Flow<List<FixtureDisplay>>
+
+    @Query(
+        """
+        SELECT * FROM fixtures
+        WHERE providerFixtureId IN (:fixtureIds)
+          AND fullTimeResult = 1
+          AND homeScore IS NOT NULL AND awayScore IS NOT NULL
+          AND postponedOrCancelled = 0
+        """
+    )
+    suspend fun completedFixturesByIds(fixtureIds: List<Long>): List<FixtureEntity>
 
     @Query(
         """
@@ -540,8 +595,9 @@ interface SportPrediDao {
         BacktestPredictionEntity::class,
         ApiFootballStandingsCacheEntity::class,
         ApiFootballOddsCacheEntity::class,
+        ApiFootballOddsSnapshotEntity::class,
     ],
-    version = 13,
+    version = 14,
     exportSchema = false,
 )
 abstract class SportPrediDatabase : RoomDatabase() {
@@ -570,6 +626,7 @@ abstract class SportPrediDatabase : RoomDatabase() {
                     MIGRATION_10_11,
                     MIGRATION_11_12,
                     MIGRATION_12_13,
+                    MIGRATION_13_14,
                 ).build().also { instance = it }
             }
 
@@ -800,6 +857,30 @@ abstract class SportPrediDatabase : RoomDatabase() {
         internal val MIGRATION_12_13 = object : Migration(12, 13) {
             override fun migrate(database: SupportSQLiteDatabase) {
                 database.execSQL("ALTER TABLE backtest_runs ADD COLUMN selectedEloKFactor REAL")
+            }
+        }
+
+        internal val MIGRATION_13_14 = object : Migration(13, 14) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS api_football_odds_snapshots (
+                        providerFixtureId INTEGER NOT NULL,
+                        fetchedAt TEXT NOT NULL,
+                        quotesJson TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        PRIMARY KEY(providerFixtureId, fetchedAt)
+                    )
+                    """.trimIndent(),
+                )
+                database.execSQL(
+                    """
+                    INSERT OR IGNORE INTO api_football_odds_snapshots
+                        (providerFixtureId, fetchedAt, quotesJson, status)
+                    SELECT providerFixtureId, fetchedAt, quotesJson, status
+                    FROM api_football_odds_cache
+                    """.trimIndent(),
+                )
             }
         }
     }

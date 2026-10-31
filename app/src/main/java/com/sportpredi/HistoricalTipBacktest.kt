@@ -97,15 +97,21 @@ internal data class HistoricalTipBacktestReport(
 internal class HistoricalTipBacktestEngine(private val dao: SportPrediDao) {
     suspend fun run(): HistoricalTipBacktestReport {
         val fixtures = dao.completedFixtures()
-        val oddsCaches = dao.allApiFootballOdds()
-        val oddsByFixtureId = oddsCaches.associateBy { it.providerFixtureId }
-        val historicalOddsFixtureIds = fixtures.asSequence()
+        val completedFixtureIds = fixtures.asSequence()
             .filter { it.fullTimeResult && !it.postponedOrCancelled }
+            .map { it.providerFixtureId }
+            .toList()
+        val oddsSnapshots = completedFixtureIds
+            .chunked(MAX_FIXTURE_IDS_PER_QUERY)
+            .flatMap { dao.apiFootballOddsSnapshotsForFixtures(it) }
+        val oddsSnapshotsByFixtureId = oddsSnapshots.groupBy { it.providerFixtureId }
+        val historicalOddsFixtureIds = fixtures.asSequence()
+            .filter { it.providerFixtureId in oddsSnapshotsByFixtureId }
             .filter { fixture ->
                 val kickoff = fixtureKickoff(fixture) ?: return@filter false
-                val oddsCache = oddsByFixtureId[fixture.providerFixtureId] ?: return@filter false
-                val fetchedAt = parseInstant(oddsCache.fetchedAt) ?: return@filter false
-                fetchedAt.isBefore(kickoff)
+                oddsSnapshotsByFixtureId[fixture.providerFixtureId]
+                    .orEmpty()
+                    .any { snapshot -> parseInstant(snapshot.fetchedAt)?.isBefore(kickoff) == true }
             }
             .map { it.providerFixtureId }
             .toList()
@@ -115,7 +121,7 @@ internal class HistoricalTipBacktestEngine(private val dao: SportPrediDao) {
         return evaluateHistoricalApiFootballTips(
             fixtures = fixtures,
             predictions = predictions,
-            oddsCaches = oddsCaches,
+            oddsSnapshots = oddsSnapshots,
             teamNames = dao.allTeams().associate { it.providerTeamId to it.name },
         )
     }
@@ -128,7 +134,7 @@ internal class HistoricalTipBacktestEngine(private val dao: SportPrediDao) {
 internal fun evaluateHistoricalApiFootballTips(
     fixtures: List<FixtureEntity>,
     predictions: List<PredictionSnapshotEntity>,
-    oddsCaches: List<ApiFootballOddsCacheEntity>,
+    oddsSnapshots: List<ApiFootballOddsSnapshotEntity>,
     teamNames: Map<Int, String> = emptyMap(),
 ): HistoricalTipBacktestReport {
     val completedFixtures = fixtures.filter {
@@ -138,7 +144,7 @@ internal fun evaluateHistoricalApiFootballTips(
             it.awayScore != null
     }
     val predictionsByFixtureId = predictions.groupBy { it.providerFixtureId }
-    val oddsByFixtureId = oddsCaches.associateBy { it.providerFixtureId }
+    val oddsByFixtureId = oddsSnapshots.groupBy { it.providerFixtureId }
     val evaluatedTips = mutableListOf<HistoricalTipBacktestEntry>()
     val expandedPositiveEvTips = mutableListOf<HistoricalTipBacktestEntry>()
     var fixturesWithPrematchOdds = 0
@@ -155,10 +161,16 @@ internal fun evaluateHistoricalApiFootballTips(
             .maxByOrNull { (_, instant) -> instant }
             ?.first
 
-        val oddsCache = oddsByFixtureId[fixture.providerFixtureId]
-        val fetchedAt = oddsCache?.fetchedAt?.let(::parseInstant)
-        val quotes = if (fetchedAt != null && fetchedAt.isBefore(kickoff)) {
-            parseApiFootballOddsQuotes(oddsCache.quotesJson)
+        val oddsSnapshot = oddsByFixtureId[fixture.providerFixtureId]
+            .orEmpty()
+            .mapNotNull { snapshot ->
+                parseInstant(snapshot.fetchedAt)?.let { fetchedAt -> snapshot to fetchedAt }
+            }
+            .filter { (_, fetchedAt) -> fetchedAt.isBefore(kickoff) }
+            .maxByOrNull { (_, fetchedAt) -> fetchedAt }
+            ?.first
+        val quotes = if (oddsSnapshot != null) {
+            parseApiFootballOddsQuotes(oddsSnapshot.quotesJson)
                 .orEmpty()
                 .filter { it.fixtureId == fixture.providerFixtureId }
                 .takeIf { it.isNotEmpty() }
@@ -168,7 +180,7 @@ internal fun evaluateHistoricalApiFootballTips(
         if (quotes != null) fixturesWithPrematchOdds += 1
         if (prediction == null || quotes == null) return@forEach
         eligibleFixtures += 1
-        val savedOddsFetchedAt = oddsCache?.fetchedAt ?: return@forEach
+        val savedOddsFetchedAt = oddsSnapshot?.fetchedAt ?: return@forEach
 
         val analysis = prediction.analysisJson?.let { json ->
             runCatching { Gson().fromJson(json, PredictionAnalysis::class.java) }.getOrNull()
@@ -313,6 +325,6 @@ private fun Int.toDoubleOrNullRatio(denominator: Int): Double? =
 private fun Double.toDoubleOrNullRatio(denominator: Int): Double? =
     if (denominator == 0) null else this / denominator
 
-private const val RESULT_WIN = "WIN"
-private const val RESULT_PUSH = "PUSH"
-private const val RESULT_LOSS = "LOSS"
+internal const val RESULT_WIN = "WIN"
+internal const val RESULT_PUSH = "PUSH"
+internal const val RESULT_LOSS = "LOSS"

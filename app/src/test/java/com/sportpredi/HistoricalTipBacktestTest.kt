@@ -21,10 +21,10 @@ class HistoricalTipBacktestTest {
                 prediction(2, "2025-01-01T10:00:00Z"),
                 prediction(3, "2025-01-04T19:00:00Z"),
             ),
-            oddsCaches = listOf(
-                oddsCache(1, "2025-01-01T11:00:00Z", listOf(quote(1, "HOME", 2.0))),
-                oddsCache(2, "2025-01-03T19:00:00Z", listOf(quote(2, "HOME", 2.0))),
-                oddsCache(3, "2025-01-04T10:00:00Z", listOf(quote(3, "HOME", 2.0))),
+            oddsSnapshots = listOf(
+                oddsSnapshot(1, "2025-01-01T11:00:00Z", listOf(quote(1, "HOME", 2.0))),
+                oddsSnapshot(2, "2025-01-03T19:00:00Z", listOf(quote(2, "HOME", 2.0))),
+                oddsSnapshot(3, "2025-01-04T10:00:00Z", listOf(quote(3, "HOME", 2.0))),
             ),
             teamNames = mapOf(1 to "Home", 2 to "Away"),
         )
@@ -44,6 +44,22 @@ class HistoricalTipBacktestTest {
     }
 
     @Test
+    fun usesTheLatestPrematchOddsSnapshotAndIgnoresLaterSnapshots() {
+        val report = evaluateHistoricalApiFootballTips(
+            fixtures = listOf(fixture(8, "2025-01-02T18:00:00Z", homeScore = 2, awayScore = 1)),
+            predictions = listOf(prediction(8, "2025-01-01T10:00:00Z")),
+            oddsSnapshots = listOf(
+                oddsSnapshot(8, "2025-01-01T10:30:00Z", listOf(quote(8, "HOME", 1.8))),
+                oddsSnapshot(8, "2025-01-01T11:30:00Z", listOf(quote(8, "HOME", 2.0))),
+                oddsSnapshot(8, "2025-01-02T19:00:00Z", listOf(quote(8, "HOME", 9.0))),
+            ),
+        )
+
+        assertEquals(2.0, report.recommendations.single().decimalOdds, 0.0)
+        assertEquals(0.20, report.recommendations.single().expectedValue, 0.000001)
+    }
+
+    @Test
     fun treatsDrawNoBetDrawAsPushAndDoesNotCountItAsAWinOrLoss() {
         val fixture = fixture(4, "2025-02-02T18:00:00Z", homeScore = 1, awayScore = 1)
         val quotes = listOf(
@@ -58,7 +74,7 @@ class HistoricalTipBacktestTest {
                 drawProbability = 0.10,
                 awayWinProbability = 0.10,
             )),
-            oddsCaches = listOf(oddsCache(4, "2025-02-01T11:00:00Z", quotes)),
+            oddsSnapshots = listOf(oddsSnapshot(4, "2025-02-01T11:00:00Z", quotes)),
         )
 
         assertEquals(1, report.pushes)
@@ -70,7 +86,7 @@ class HistoricalTipBacktestTest {
     }
 
     @Test
-    fun treatsExactIntegerGoalLineAsPushInHistoricalResults() {
+    fun excludesIntegerGoalLinesFromHistoricalRecommendations() {
         val fixture = fixture(6, "2025-02-02T18:00:00Z", homeScore = 2, awayScore = 2)
         val report = evaluateHistoricalApiFootballTips(
             fixtures = listOf(fixture),
@@ -79,8 +95,8 @@ class HistoricalTipBacktestTest {
                     analysisJson = Gson().toJson(goalAnalysis()),
                 ),
             ),
-            oddsCaches = listOf(
-                oddsCache(
+            oddsSnapshots = listOf(
+                oddsSnapshot(
                     6,
                     "2025-02-01T11:00:00Z",
                     listOf(ApiFootballOddsQuote(6, "TOTAL_GOALS", "UNDER_4.0", 2.4, "Book A")),
@@ -88,11 +104,34 @@ class HistoricalTipBacktestTest {
             ),
         )
 
-        assertEquals(1, report.pushes)
+        assertEquals(0, report.pushes)
         assertEquals(0, report.wins)
         assertEquals(0, report.losses)
-        assertEquals("PUSH", report.recommendations.single().result)
-        assertEquals(0.0, report.returnOnInvestment!!, 0.0)
+        assertTrue(report.recommendations.isEmpty())
+        assertTrue(report.expandedPositiveEvRecommendations.isEmpty())
+    }
+
+    @Test
+    fun evaluatesHalfGoalTipAgainstTheFinishedScore() {
+        val report = evaluateHistoricalApiFootballTips(
+            fixtures = listOf(fixture(9, "2025-02-02T18:00:00Z", homeScore = 2, awayScore = 1)),
+            predictions = listOf(
+                prediction(9, "2025-02-01T10:00:00Z").copy(
+                    analysisJson = Gson().toJson(goalAnalysis()),
+                ),
+            ),
+            oddsSnapshots = listOf(
+                oddsSnapshot(
+                    9,
+                    "2025-02-01T11:00:00Z",
+                    listOf(ApiFootballOddsQuote(9, "TOTAL_GOALS", "UNDER_3.5", 1.5, "Book A")),
+                ),
+            ),
+        )
+
+        assertEquals(1, report.wins)
+        assertEquals(0, report.losses)
+        assertEquals("UNDER_3.5", report.recommendations.single().outcome)
     }
 
     @Test
@@ -106,8 +145,8 @@ class HistoricalTipBacktestTest {
                     awayWinProbability = 0.20,
                 ),
             ),
-            oddsCaches = listOf(
-                oddsCache(7, "2025-02-01T11:00:00Z", listOf(quote(7, "HOME", 2.0))),
+            oddsSnapshots = listOf(
+                oddsSnapshot(7, "2025-02-01T11:00:00Z", listOf(quote(7, "HOME", 2.0))),
             ),
         )
 
@@ -121,7 +160,7 @@ class HistoricalTipBacktestTest {
         val report = evaluateHistoricalApiFootballTips(
             fixtures = listOf(fixture(5, "2025-03-02T18:00:00Z", homeScore = 0, awayScore = 0)),
             predictions = emptyList(),
-            oddsCaches = emptyList(),
+            oddsSnapshots = emptyList(),
         )
 
         assertEquals(1, report.completedFixtures)
@@ -169,15 +208,15 @@ class HistoricalTipBacktestTest {
         modelVersion = LocalForecastingState.MODEL_VERSION,
     )
 
-    private fun oddsCache(
+    private fun oddsSnapshot(
         fixtureId: Long,
         fetchedAt: String,
         quotes: List<ApiFootballOddsQuote>,
-    ) = ApiFootballOddsCacheEntity(
+    ) = ApiFootballOddsSnapshotEntity(
         providerFixtureId = fixtureId,
+        fetchedAt = fetchedAt,
         quotesJson = Gson().toJson(quotes),
         status = ApiFootballOddsCacheStatus.AVAILABLE,
-        fetchedAt = fetchedAt,
     )
 
     private fun quote(fixtureId: Long, outcome: String, odds: Double) =

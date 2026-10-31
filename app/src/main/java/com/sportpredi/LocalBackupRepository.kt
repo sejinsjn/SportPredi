@@ -18,6 +18,8 @@ private data class LocalBackupDocument(
     val backtestRuns: List<BacktestRunEntity>?,
     val backtestMetrics: List<BacktestModelMetricEntity>?,
     val backtestPredictions: List<BacktestPredictionEntity>?,
+    val apiFootballOddsCache: List<ApiFootballOddsCacheEntity>?,
+    val apiFootballOddsSnapshots: List<ApiFootballOddsSnapshotEntity>?,
 )
 
 class LocalBackupRepository(private val database: SportPrediDatabase) {
@@ -39,6 +41,8 @@ class LocalBackupRepository(private val database: SportPrediDatabase) {
                 backtestRuns = dao.allBacktestRuns(),
                 backtestMetrics = dao.allBacktestMetrics(),
                 backtestPredictions = dao.allBacktestPredictions(),
+                apiFootballOddsCache = dao.allApiFootballOdds(),
+                apiFootballOddsSnapshots = dao.allApiFootballOddsSnapshots(),
             ),
         )
     }
@@ -73,6 +77,13 @@ class LocalBackupRepository(private val database: SportPrediDatabase) {
             ?: throw IllegalArgumentException("Backtest-Metriken fehlen in der Sicherung.")
         val backtestPredictions = document.backtestPredictions
             ?: throw IllegalArgumentException("Backtest-Prognosen fehlen in der Sicherung.")
+        if (document.formatVersion >= ODDS_BACKUP_FORMAT_VERSION) {
+            require(document.apiFootballOddsCache != null && document.apiFootballOddsSnapshots != null) {
+                "Quotendaten fehlen in der Sicherung."
+            }
+        }
+        val apiFootballOddsCache = document.apiFootballOddsCache.orEmpty()
+        val apiFootballOddsSnapshots = document.apiFootballOddsSnapshots.orEmpty()
         validate(
             competitions,
             seasons,
@@ -85,6 +96,8 @@ class LocalBackupRepository(private val database: SportPrediDatabase) {
                 if (metric.scope.isNullOrBlank()) metric.copy(scope = "all") else metric
             },
             backtestPredictions,
+            apiFootballOddsCache,
+            apiFootballOddsSnapshots,
         )
 
         database.withTransaction {
@@ -92,6 +105,8 @@ class LocalBackupRepository(private val database: SportPrediDatabase) {
             dao.clearBacktestPredictions()
             dao.clearBacktestMetrics()
             dao.clearBacktestRuns()
+            dao.clearApiFootballOddsSnapshots()
+            dao.clearApiFootballOddsCache()
             dao.clearPredictionEvaluations()
             dao.clearPredictions()
             dao.clearFixtures()
@@ -115,6 +130,8 @@ class LocalBackupRepository(private val database: SportPrediDatabase) {
                 },
             )
             dao.insertBacktestPredictions(backtestPredictions)
+            dao.upsertApiFootballOddsCache(apiFootballOddsCache)
+            dao.insertApiFootballOddsSnapshots(apiFootballOddsSnapshots)
         }
     }
 
@@ -128,6 +145,8 @@ class LocalBackupRepository(private val database: SportPrediDatabase) {
         runs: List<BacktestRunEntity>,
         metrics: List<BacktestModelMetricEntity>,
         backtestPredictions: List<BacktestPredictionEntity>,
+        apiFootballOddsCache: List<ApiFootballOddsCacheEntity>,
+        apiFootballOddsSnapshots: List<ApiFootballOddsSnapshotEntity>,
     ) {
         require(competitions.map { it.providerCode }.toSet().size == competitions.size) {
             "Doppelte Wettbewerbe in der Sicherung."
@@ -187,6 +206,20 @@ class LocalBackupRepository(private val database: SportPrediDatabase) {
         require(predictions.all { it.providerFixtureId in fixtureIds }) {
             "Ein Prognose-Snapshot verweist auf ein unbekanntes Spiel."
         }
+        require(apiFootballOddsCache.map { it.providerFixtureId }.toSet().size == apiFootballOddsCache.size) {
+            "Doppelte aktuelle Quoten in der Sicherung."
+        }
+        require(
+            apiFootballOddsSnapshots.map { it.providerFixtureId to it.fetchedAt }.toSet().size ==
+                apiFootballOddsSnapshots.size,
+        ) {
+            "Doppelte Quoten-Snapshots in der Sicherung."
+        }
+        require(apiFootballOddsCache.all { it.providerFixtureId in fixtureIds } &&
+            apiFootballOddsSnapshots.all { it.providerFixtureId in fixtureIds }
+        ) {
+            "Quotendaten verweisen auf ein unbekanntes Spiel."
+        }
         val predictionIds = predictions.map { it.id }.toSet()
         require(predictionEvaluations.all { it.predictionSnapshotId in predictionIds }) {
             "Eine Prognoseauswertung verweist auf einen unbekannten Snapshot."
@@ -203,7 +236,8 @@ class LocalBackupRepository(private val database: SportPrediDatabase) {
 
     companion object {
         private const val MINIMUM_SUPPORTED_FORMAT = 2
-        private const val FORMAT_VERSION = 6
+        private const val FORMAT_VERSION = 7
+        private const val ODDS_BACKUP_FORMAT_VERSION = 7
         private const val API_FOOTBALL_DAILY_REQUESTS_KEY = "apiFootballRequestsToday"
     }
 }

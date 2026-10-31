@@ -46,6 +46,26 @@ class ApiOnlyMigrationTest {
     }
 
     @Test
+    fun migrationArchivesExistingOddsCacheRowsAsSnapshots() {
+        val statements = mutableListOf<String>()
+        val database = Proxy.newProxyInstance(
+            SupportSQLiteDatabase::class.java.classLoader,
+            arrayOf(SupportSQLiteDatabase::class.java),
+        ) { _, method, arguments ->
+            if (method.name == "execSQL") statements += arguments?.get(0) as String
+            null
+        } as SupportSQLiteDatabase
+
+        SportPrediDatabase.MIGRATION_13_14.migrate(database)
+
+        assertEquals(2, statements.size)
+        assertTrue(statements[0].contains("CREATE TABLE IF NOT EXISTS api_football_odds_snapshots"))
+        assertTrue(statements[0].contains("PRIMARY KEY(providerFixtureId, fetchedAt)"))
+        assertTrue(statements[1].contains("INSERT OR IGNORE INTO api_football_odds_snapshots"))
+        assertTrue(statements[1].contains("FROM api_football_odds_cache"))
+    }
+
+    @Test
     fun migrationClearsOnlyRetiredFootballAndPredictionTables() {
         val statements = mutableListOf<String>()
         val database = Proxy.newProxyInstance(

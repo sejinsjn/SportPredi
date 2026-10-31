@@ -27,6 +27,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -37,6 +38,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -49,11 +51,14 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.unit.dp
 import com.google.gson.Gson
 import com.google.gson.JsonParseException
@@ -67,14 +72,28 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+private const val DISPLAY_PREFERENCES = "sportpredi_display_preferences"
+private const val DARK_MODE_PREFERENCE = "dark_mode_enabled"
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         LocalSyncWorker.schedule(applicationContext)
+        val displayPreferences = getSharedPreferences(DISPLAY_PREFERENCES, MODE_PRIVATE)
         setContent {
-            MaterialTheme {
+            var darkMode by remember {
+                mutableStateOf(displayPreferences.getBoolean(DARK_MODE_PREFERENCE, false))
+            }
+            SportPrediTheme(darkTheme = darkMode) {
                 Surface(modifier = Modifier.fillMaxSize()) {
-                    AppScreen(SportPrediDatabase.get(applicationContext))
+                    AppScreen(
+                        database = SportPrediDatabase.get(applicationContext),
+                        darkMode = darkMode,
+                        onDarkModeChange = { enabled ->
+                            displayPreferences.edit().putBoolean(DARK_MODE_PREFERENCE, enabled).apply()
+                            darkMode = enabled
+                        },
+                    )
                 }
             }
         }
@@ -101,7 +120,11 @@ private data class TargetCatalogUiData(
 )
 
 @Composable
-private fun AppScreen(database: SportPrediDatabase) {
+private fun AppScreen(
+    database: SportPrediDatabase,
+    darkMode: Boolean,
+    onDarkModeChange: (Boolean) -> Unit,
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val backupRepository = remember(database) { LocalBackupRepository(database) }
@@ -147,7 +170,8 @@ private fun AppScreen(database: SportPrediDatabase) {
                 }
                 lastUpdated = report.completedAt
                 syncMessage = if (report.wasThrottled) {
-                    "API-Football-Anfrage wegen des lokalen Cooldowns ausgelassen."
+                    "Automatische API-Football-Abfrage wegen des lokalen 15-Minuten-Cooldowns " +
+                        "ausgelassen; manuelles Aktualisieren umgeht diesen Schutz."
                 } else {
                     "${report.competitionsChecked} API-Football-Wettbewerbe; " +
                         "${report.fixturesImported} Spiele; ${report.requestsUsed}/" +
@@ -211,7 +235,8 @@ private fun AppScreen(database: SportPrediDatabase) {
                 LocalPredictionEngine(dao).refreshUpcomingPredictions()
             }
             syncMessage = if (report.wasThrottled) {
-                "API-Football-Abfrage wegen des lokalen Cooldowns ausgelassen."
+                "Automatische API-Football-Abfrage wegen des lokalen 15-Minuten-Cooldowns " +
+                    "ausgelassen; manuelles Aktualisieren umgeht diesen Schutz."
             } else if (report.requestsUsed == 0 && report.errors.isEmpty()) {
                 "API-Football-Daten sind aktuell."
             } else {
@@ -297,6 +322,8 @@ private fun AppScreen(database: SportPrediDatabase) {
             )
             AppPage.PERFORMANCE -> PerformanceScreen(database)
             AppPage.SETTINGS -> SettingsScreen(
+                darkMode = darkMode,
+                onDarkModeChange = onDarkModeChange,
                 apiCredentialsMessage = apiCredentialsMessage,
                 apiCredentialsError = apiCredentialsError,
                 backupMessage = backupMessage,
@@ -454,6 +481,8 @@ private fun AppScreen(database: SportPrediDatabase) {
 
 @Composable
 private fun SettingsScreen(
+    darkMode: Boolean,
+    onDarkModeChange: (Boolean) -> Unit,
     apiCredentialsMessage: String?,
     apiCredentialsError: Boolean,
     backupMessage: String?,
@@ -468,6 +497,32 @@ private fun SettingsScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text("Einstellungen", style = MaterialTheme.typography.headlineMedium)
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = MaterialTheme.shapes.large,
+            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 18.dp, vertical = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Text("Darstellung", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        if (darkMode) "Dark Mode · gelbe Akzente" else "Light Mode",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(checked = darkMode, onCheckedChange = onDarkModeChange)
+            }
+        }
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(
                 modifier = Modifier.padding(16.dp),
@@ -566,8 +621,45 @@ private fun FixturesScreen(
         else -> today.plusDays(6)
     }
     val topTipsStartDate = if (range == "Morgen") today.plusDays(1) else today
-    val fixtures by dao.observeUpcoming(today.toString(), endDate.toString())
+    val fixtures by dao.observeFixtures(today.toString(), endDate.toString())
         .collectAsState(initial = emptyList())
+    var settledTipResults by remember {
+        mutableStateOf<Map<Long, HistoricalTipBacktestEntry>?>(null)
+    }
+    var settledTipError by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(dao, fixtures) {
+        val completedFixtureIds = fixtures.asSequence()
+            .filter { it.fullTimeResult && !it.postponedOrCancelled }
+            .map { it.providerFixtureId }
+            .toList()
+        if (completedFixtureIds.isEmpty()) {
+            settledTipResults = emptyMap()
+            settledTipError = null
+            return@LaunchedEffect
+        }
+        settledTipResults = null
+        settledTipError = null
+        try {
+            settledTipResults = withContext(Dispatchers.IO) {
+                val completed = completedFixtureIds.chunked(400)
+                    .flatMap { dao.completedFixturesByIds(it) }
+                val predictions = completedFixtureIds.chunked(400)
+                    .flatMap { dao.predictionsForFixtures(it) }
+                val oddsSnapshots = completedFixtureIds.chunked(400)
+                    .flatMap { dao.apiFootballOddsSnapshotsForFixtures(it) }
+                evaluateHistoricalApiFootballTips(
+                    fixtures = completed,
+                    predictions = predictions,
+                    oddsSnapshots = oddsSnapshots,
+                ).recommendations.associateBy { it.fixtureId }
+            }
+        } catch (exception: CancellationException) {
+            throw exception
+        } catch (exception: Exception) {
+            settledTipResults = emptyMap()
+            settledTipError = exception.message ?: "Unbekannter Fehler"
+        }
+    }
     var coverageRows by remember { mutableStateOf(emptyList<SeasonCoverageRow>()) }
     var targetCatalogChecked by remember { mutableStateOf(false) }
     var targetCatalogCheckedAt by remember { mutableStateOf<String?>(null) }
@@ -673,6 +765,9 @@ private fun FixturesScreen(
     if (selectedFixture != null) {
         FixtureDetailsScreen(
             display = selectedFixture!!,
+            historicalTipResult = settledTipResults?.get(selectedFixture!!.providerFixtureId),
+            historicalTipLoading = selectedFixture!!.fullTimeResult && settledTipResults == null,
+            historicalTipError = settledTipError,
             dao = dao,
             syncRepository = syncRepository,
             apiKey = apiKey,
@@ -697,7 +792,7 @@ private fun FixturesScreen(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
-            Text("Kommende Spiele", style = MaterialTheme.typography.headlineMedium)
+            Text("Spiele & Ergebnisse", style = MaterialTheme.typography.headlineMedium)
             TextButton(onClick = { showFixturesInfo = true }) {
                 Text("Info")
             }
@@ -921,7 +1016,13 @@ private fun FixturesScreen(
         }
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             visibleFixtures.forEach { fixture ->
-                FixtureCard(fixture) { openFixture(fixture) }
+                FixtureCard(
+                    fixture = fixture,
+                    historicalTipResult = settledTipResults?.get(fixture.providerFixtureId),
+                    historicalTipLoading = fixture.fullTimeResult && settledTipResults == null,
+                    historicalTipError = settledTipError,
+                    onClick = { openFixture(fixture) },
+                )
             }
         }
         if (coverageRows.isNotEmpty() || targetCatalogChecked) {
@@ -1226,7 +1327,13 @@ private fun ApiFootballSelectionDialog(
 }
 
 @Composable
-private fun FixtureCard(fixture: FixtureDisplay, onClick: () -> Unit) {
+private fun FixtureCard(
+    fixture: FixtureDisplay,
+    historicalTipResult: HistoricalTipBacktestEntry?,
+    historicalTipLoading: Boolean,
+    historicalTipError: String?,
+    onClick: () -> Unit,
+) {
     val analysis = remember(fixture.analysisJson) {
         parsePredictionAnalysis(fixture.analysisJson)
     }
@@ -1250,22 +1357,32 @@ private fun FixtureCard(fixture: FixtureDisplay, onClick: () -> Unit) {
         fixture.status == "CANCELLED" -> "Abgesagt"
         fixture.postponedOrCancelled -> "Verschoben"
         fixture.rescheduled -> "Neu terminiert"
-        fixture.homeScore != null && fixture.awayScore != null -> "Beendet"
+        fixture.fullTimeResult -> "Beendet"
         else -> "Anstehend"
     }
-    val statusColor = when {
-        fixture.status == "CANCELLED" -> MaterialTheme.colorScheme.error
-        fixture.postponedOrCancelled -> MaterialTheme.colorScheme.tertiary
-        else -> MaterialTheme.colorScheme.secondary
+    val statusColors = when {
+        historicalTipResult != null -> historicalTipResultColor(historicalTipResult.result) to
+            historicalTipResultContainerColor(historicalTipResult.result)
+        fixture.status == "CANCELLED" -> MaterialTheme.colorScheme.error to
+            MaterialTheme.colorScheme.errorContainer
+        fixture.postponedOrCancelled -> MaterialTheme.colorScheme.onSurfaceVariant to
+            MaterialTheme.colorScheme.surfaceVariant
+        fixture.fullTimeResult -> MaterialTheme.colorScheme.onSurfaceVariant to
+            MaterialTheme.colorScheme.surfaceVariant
+        else -> MaterialTheme.colorScheme.onPrimaryContainer to
+            MaterialTheme.colorScheme.primaryContainer
     }
     Card(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick),
+        shape = MaterialTheme.shapes.large,
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
     ) {
         Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            modifier = Modifier.padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -1274,45 +1391,98 @@ private fun FixtureCard(fixture: FixtureDisplay, onClick: () -> Unit) {
             ) {
                 Text(
                     "${fixture.country ?: "Land unbekannt"} · ${fixture.competitionName ?: "Wettbewerb unbekannt"}",
-                    modifier = Modifier.weight(1f),
-                    style = MaterialTheme.typography.titleSmall,
-                    maxLines = 1,
+                    modifier = Modifier.weight(1f).padding(end = 12.dp),
+                    style = MaterialTheme.typography.labelLarge,
+                    maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
-                Text(
-                    statusLabel,
-                    modifier = Modifier.padding(start = 8.dp),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = statusColor,
-                )
+                Surface(
+                    shape = RoundedCornerShape(50.dp),
+                    color = statusColors.second,
+                ) {
+                    Text(
+                        statusLabel,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = statusColors.first,
+                    )
+                }
             }
+
             Text(
                 fixture.kickoffAt?.let(::formatTimestamp) ?: fixture.matchDate,
-                style = MaterialTheme.typography.bodySmall,
+                style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text(
-                    fixture.homeTeamName ?: "TBD",
-                    style = MaterialTheme.typography.titleMedium,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Text("vs", style = MaterialTheme.typography.bodySmall)
-                Text(
-                    fixture.awayTeamName ?: "TBD",
-                    style = MaterialTheme.typography.titleMedium,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Text(
+                        "HEIM",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.secondary,
+                    )
+                    Text(
+                        fixture.homeTeamName ?: "TBD",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                if (fixture.fullTimeResult && fixture.homeScore != null && fixture.awayScore != null) {
+                    Text(
+                        "${fixture.homeScore} : ${fixture.awayScore}",
+                        modifier = Modifier.padding(horizontal = 4.dp),
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = historicalTipResult?.let {
+                            historicalTipResultColor(it.result)
+                        } ?: MaterialTheme.colorScheme.onSurface,
+                    )
+                } else {
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                    ) {
+                        Text(
+                            "VS",
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+                Column(
+                    modifier = Modifier.weight(1f),
+                    horizontalAlignment = Alignment.End,
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Text(
+                        "AUSWÄRTS",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.secondary,
+                    )
+                    Text(
+                        fixture.awayTeamName ?: "TBD",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        textAlign = TextAlign.End,
+                    )
+                }
             }
-            if (fixture.homeScore != null && fixture.awayScore != null) {
-                Text(
-                    "Ergebnis · ${fixture.homeScore} : ${fixture.awayScore}",
-                    style = MaterialTheme.typography.titleSmall,
-                )
-            }
-            if (fixture.venue?.isNotBlank() == true || fixture.seasonYear != null) {
+
+            if (fixture.venue?.isNotBlank() == true || fixture.seasonYear != null || fixture.matchday != null) {
                 Text(
                     listOfNotNull(
                         fixture.venue?.takeIf(String::isNotBlank),
@@ -1325,6 +1495,7 @@ private fun FixtureCard(fixture: FixtureDisplay, onClick: () -> Unit) {
                     overflow = TextOverflow.Ellipsis,
                 )
             }
+
             if (forecast != null) {
                 HorizontalDivider()
                 Row(
@@ -1337,24 +1508,17 @@ private fun FixtureCard(fixture: FixtureDisplay, onClick: () -> Unit) {
                 }
                 outcomePrediction?.let {
                     Text(
-                        "${if (forecast.marketAdjusted) "Markt-/Modellprognose" else "Modellprognose"}: " +
-                            "${outcomeDisplayLabel(it.selection)} " +
-                            "(${percent(it.probability)})",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
-                if (forecast.marketAdjusted) {
-                    Text(
-                        "60 % faire Buchmacherchance · 40 % lokales Modell",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        "${if (forecast.marketAdjusted) "Markt + Modell" else "Modell"} · " +
+                            "${outcomeDisplayLabel(it.selection)} · ${percent(it.probability)}",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.primary,
                     )
                 }
                 if (fixture.expectedHomeGoals != null && fixture.expectedAwayGoals != null) {
                     Text(
-                        "Erwartete Tore (Heim : Auswärts): ${fixture.expectedHomeGoals.format(2)} : " +
+                        "Erwartete Tore · ${fixture.expectedHomeGoals.format(2)} : " +
                             fixture.expectedAwayGoals.format(2),
-                        style = MaterialTheme.typography.bodySmall,
+                        style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
@@ -1365,24 +1529,34 @@ private fun FixtureCard(fixture: FixtureDisplay, onClick: () -> Unit) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            ApiFootballValueTipSummary(
-                homeProbability = fixture.homeWinProbability,
-                drawProbability = fixture.drawProbability,
-                awayProbability = fixture.awayWinProbability,
-                analysis = analysis,
-                quotesJson = fixture.oddsQuotesJson,
-                status = fixture.oddsStatus,
-                fetchedAt = fixture.oddsFetchedAt,
-            )
+
+            if (fixture.fullTimeResult) {
+                HistoricalTipResultSummary(
+                    entry = historicalTipResult,
+                    loading = historicalTipLoading,
+                    error = historicalTipError,
+                )
+            } else {
+                ApiFootballValueTipSummary(
+                    homeProbability = fixture.homeWinProbability,
+                    drawProbability = fixture.drawProbability,
+                    awayProbability = fixture.awayWinProbability,
+                    analysis = analysis,
+                    quotesJson = fixture.oddsQuotesJson,
+                    status = fixture.oddsStatus,
+                    fetchedAt = fixture.oddsFetchedAt,
+                )
+            }
+
             analysis?.let {
                 Text(
-                    "${it.confidenceLabel} · Tippen für Details",
-                    style = MaterialTheme.typography.bodySmall,
+                    "${it.confidenceLabel} · Details öffnen",
+                    style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             } ?: Text(
-                "Tippen für Spielanalyse",
-                style = MaterialTheme.typography.bodySmall,
+                "Für Spielanalyse öffnen",
+                style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
@@ -1395,24 +1569,31 @@ private fun ProbabilitySummaryCell(
     probability: Double,
     modifier: Modifier = Modifier,
 ) {
-    Column(
+    Surface(
         modifier = modifier,
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(2.dp),
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
     ) {
-        Text(
-            label,
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = TextAlign.Center,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        Text(
-            percent(probability),
-            style = MaterialTheme.typography.titleSmall,
-            textAlign = TextAlign.Center,
-        )
+        Column(
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 10.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(
+                label,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                percent(probability),
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.Center,
+            )
+        }
     }
 }
 
@@ -1543,12 +1724,26 @@ private fun DailyTopTipsSection(
     periodTitle: String,
     onFixtureClick: (FixtureDisplay) -> Unit,
 ) {
-    Card(modifier = Modifier.fillMaxWidth()) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.large,
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+    ) {
         Column(
             modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Text("Top 10 Tipps $periodTitle", style = MaterialTheme.typography.titleLarge)
+            Text(
+                "Top 10 Tipps",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold,
+            )
+            Text(
+                periodTitle.replaceFirstChar { it.uppercase() },
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+            )
             Text(
                 "Zeitraum über die Auswahl oben · mindestens 60 % bewertete Gewinnchance und positiver EV · " +
                     "Chance und Auszahlung werden balanciert; wiederholte Marktrichtungen werden " +
@@ -1562,43 +1757,72 @@ private fun DailyTopTipsSection(
                         "bewertete Gewinnchance und positiven konservativen EV.",
                 )
             } else {
-                tips.forEachIndexed { index, entry ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onFixtureClick(entry.fixture) }
-                            .padding(vertical = 4.dp),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text("${index + 1}.", style = MaterialTheme.typography.titleMedium)
-                        Column(
-                            modifier = Modifier.weight(1f),
-                            verticalArrangement = Arrangement.spacedBy(2.dp),
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    tips.forEachIndexed { index, entry ->
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onFixtureClick(entry.fixture) },
+                            shape = MaterialTheme.shapes.medium,
+                            color = MaterialTheme.colorScheme.surfaceVariant,
                         ) {
-                            Text(
-                                "${entry.fixture.homeTeamName ?: "TBD"} – " +
-                                    (entry.fixture.awayTeamName ?: "TBD"),
-                                style = MaterialTheme.typography.titleSmall,
-                            )
-                            Text(
-                                "${apiFootballMarketLabel(entry.tip.market, entry.tip.outcome)} · " +
-                                    "Quote ${entry.tip.decimalOdds.format(2)} · " +
-                                    "Chance ${percent(entry.tip.selectionProbability)} · " +
-                                    "EV +${(entry.tip.expectedValue * 100).format(1)}%",
-                                style = MaterialTheme.typography.bodySmall,
-                            )
-                            Text(
-                                "${entry.fixture.kickoffAt?.let(::formatTimestamp) ?: entry.fixture.matchDate} · " +
-                                    (entry.fixture.competitionName ?: "Wettbewerb unbekannt"),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
+                            Row(
+                                modifier = Modifier.padding(12.dp),
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Surface(
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = MaterialTheme.colorScheme.primaryContainer,
+                                ) {
+                                    Text(
+                                        (index + 1).toString(),
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    )
+                                }
+                                Column(
+                                    modifier = Modifier.weight(1f),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                                ) {
+                                    Text(
+                                        "${entry.fixture.homeTeamName ?: "TBD"} – " +
+                                            (entry.fixture.awayTeamName ?: "TBD"),
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.SemiBold,
+                                    )
+                                    Text(
+                                        apiFootballMarketLabel(entry.tip.market, entry.tip.outcome),
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.primary,
+                                    )
+                                    Text(
+                                        "${entry.fixture.kickoffAt?.let(::formatTimestamp) ?: entry.fixture.matchDate} · " +
+                                            (entry.fixture.competitionName ?: "Wettbewerb unbekannt"),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                                Column(horizontalAlignment = Alignment.End) {
+                                    Text(
+                                        entry.tip.decimalOdds.format(2),
+                                        style = MaterialTheme.typography.titleMedium,
+                                        fontWeight = FontWeight.Bold,
+                                    )
+                                    Text(
+                                        "${percent(entry.tip.selectionProbability)} · " +
+                                            "+${(entry.tip.expectedValue * 100).format(1)}%",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
                         }
                     }
-                    if (index < tips.lastIndex) HorizontalDivider()
                 }
             }
         }
@@ -1632,6 +1856,9 @@ private data class LocalStanding(
 @Composable
 private fun FixtureDetailsScreen(
     display: FixtureDisplay,
+    historicalTipResult: HistoricalTipBacktestEntry?,
+    historicalTipLoading: Boolean,
+    historicalTipError: String?,
     dao: SportPrediDao,
     syncRepository: LocalSyncRepository,
     apiKey: String,
@@ -1844,15 +2071,23 @@ private fun FixtureDetailsScreen(
         }
 
         DetailSection("Value-Tipp · API-Football-Quoten") {
-            ApiFootballValueTipSummary(
-                homeProbability = display.homeWinProbability,
-                drawProbability = display.drawProbability,
-                awayProbability = display.awayWinProbability,
-                analysis = analysis,
-                quotesJson = display.oddsQuotesJson,
-                status = display.oddsStatus,
-                fetchedAt = display.oddsFetchedAt,
-            )
+            if (display.fullTimeResult) {
+                HistoricalTipResultSummary(
+                    entry = historicalTipResult,
+                    loading = historicalTipLoading,
+                    error = historicalTipError,
+                )
+            } else {
+                ApiFootballValueTipSummary(
+                    homeProbability = display.homeWinProbability,
+                    drawProbability = display.drawProbability,
+                    awayProbability = display.awayWinProbability,
+                    analysis = analysis,
+                    quotesJson = display.oddsQuotesJson,
+                    status = display.oddsStatus,
+                    fetchedAt = display.oddsFetchedAt,
+                )
+            }
             Text(
                 "Die bewertete Chance kombiniert Modell und faire Buchmacherchance zu gleichen Teilen; " +
                     "wenn Gegenquoten fehlen, dient die angebotene Quote als Marktvergleich. Berücksichtigt " +
@@ -1861,8 +2096,10 @@ private fun FixtureDetailsScreen(
                     "Auszahlung mit einem weichen Score: Die Trefferchance zählt zu 70 %, die begrenzte " +
                     "Auszahlungsattraktivität zu 30 %. So werden weder sehr kurze Quoten noch Außenseiter " +
                     "automatisch bevorzugt. Die Quote bleibt dynamisch, die Mindestchance ist 60 %. Bei " +
-                    "Rückzahlung wird die Gewinnchance getrennt von der Push-Chance ausgewiesen. " +
-                    "Eine Schätzung, keine Garantie.",
+                        "Torwetten werden nur Halbtorlinien (1,5, 2,5, 3,5 usw.) berücksichtigt; ganze " +
+                        "Torlinien werden ausgeschlossen. Bei Rückzahlung wird die Gewinnchance getrennt " +
+                        "von der Push-Chance ausgewiesen. " +
+                        "Eine Schätzung, keine Garantie.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -2042,31 +2279,65 @@ private fun ApiFootballValueTipSummary(
             null
         }
     }
+
     if (tip == null) {
-        Text(
-            when {
-                homeProbability == null || drawProbability == null || awayProbability == null ->
-                    "Kein Value-Tipp verfügbar: Modellwahrscheinlichkeiten fehlen."
-                else ->
-                    "Keine Quote erfüllt gleichzeitig mindestens 60 % bewertete Gewinnchance und " +
-                        "positiven konservativen Erwartungswert."
-            },
-            style = MaterialTheme.typography.bodySmall,
-        )
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = MaterialTheme.shapes.medium,
+            color = MaterialTheme.colorScheme.surfaceVariant,
+        ) {
+            Text(
+                when {
+                    homeProbability == null || drawProbability == null || awayProbability == null ->
+                        "Noch kein Value-Tipp: Prognosewahrscheinlichkeiten fehlen."
+                    else ->
+                        "Kein Tipp erfüllt Chance- und Erwartungswertgrenze."
+                },
+                modifier = Modifier.padding(12.dp),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     } else {
-        Text(
-            "${apiFootballMarketLabel(tip.market, tip.outcome)} · " +
-                "Quote ${tip.decimalOdds.format(2)} · Chance ${percent(tip.selectionProbability)} " +
-                "(Modell ${percent(tip.modelProbability)})" +
-                (if (tip.pushProbability > 0.0) {
-                    " · Push-Chance ${percent(tip.pushProbability)} = Rückzahlung"
-                } else {
-                    ""
-                }) + " · " +
-                "EV +${(tip.expectedValue * 100).format(1)}% · ${tip.bookmaker}",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.primary,
-        )
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = MaterialTheme.shapes.medium,
+            color = MaterialTheme.colorScheme.primaryContainer,
+        ) {
+            Column(
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Text(
+                    "VALUE-TIPP",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                )
+                Text(
+                    apiFootballMarketLabel(tip.market, tip.outcome),
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                )
+                Text(
+                    "Quote ${tip.decimalOdds.format(2)} · Chance ${percent(tip.selectionProbability)} · " +
+                        "EV +${(tip.expectedValue * 100).format(1)}%",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                )
+                Text(
+                    "${tip.bookmaker} · Modell ${percent(tip.modelProbability)}" +
+                        if (tip.pushProbability > 0.0) {
+                            " · Push ${percent(tip.pushProbability)}"
+                        } else {
+                            ""
+                        },
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                )
+            }
+        }
     }
     Text(
         when (status) {
@@ -2096,6 +2367,84 @@ private fun ApiFootballValueTipSummary(
         )
     }
 }
+
+@Composable
+private fun HistoricalTipResultSummary(
+    entry: HistoricalTipBacktestEntry?,
+    loading: Boolean,
+    error: String?,
+) {
+    when {
+        error != null -> Text(
+            "Tipp-Ergebnis konnte nicht geladen werden: $error",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+        )
+        loading -> Text(
+            "Vorab-Tipp wird mit dem Ergebnis abgeglichen …",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        entry == null -> Text(
+            "Kein auswertbarer Tipp mit gespeicherter Vorabquote und Prognose.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        else -> {
+            val resultLabel = when (entry.result) {
+                RESULT_WIN -> "TREFFER"
+                RESULT_LOSS -> "VERLOREN"
+                RESULT_PUSH -> "PUSH · EINSATZ ZURÜCK"
+                else -> "NICHT AUSWERTBAR"
+            }
+            val resultColor = historicalTipResultColor(entry.result)
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = MaterialTheme.shapes.medium,
+                color = historicalTipResultContainerColor(entry.result),
+            ) {
+                Column(
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Text(
+                        resultLabel,
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = resultColor,
+                    )
+                    Text(
+                        "${apiFootballMarketLabel(entry.market, entry.outcome)} · " +
+                            "Quote ${entry.decimalOdds.format(2)}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        "Vorabchance ${percent(entry.predictedWinProbability)}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun historicalTipResultColor(result: String): Color =
+    when (result) {
+        RESULT_WIN -> MaterialTheme.colorScheme.tertiary
+        RESULT_LOSS -> MaterialTheme.colorScheme.error
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+
+@Composable
+private fun historicalTipResultContainerColor(result: String): Color =
+    when (result) {
+        RESULT_WIN -> MaterialTheme.colorScheme.tertiaryContainer
+        RESULT_LOSS -> MaterialTheme.colorScheme.errorContainer
+        else -> MaterialTheme.colorScheme.secondaryContainer
+    }
 
 @Composable
 private fun DetailSection(
@@ -2304,7 +2653,9 @@ private fun PerformanceScreen(database: SportPrediDatabase) {
                 "Die aktuelle Tippregel wird rückwirkend auf gespeicherte Prognosen und Quoten angewendet; " +
                     "das sind nicht zwingend die Tipps, die damals tatsächlich angezeigt wurden. Beide " +
                     "Snapshots müssen nachweislich vor Anpfiff vorliegen; die Quoten können älter als der " +
-                    "letzte Marktstand sein.",
+                    "letzte Marktstand sein. Neue Quotenstände werden dauerhaft archiviert; für ältere " +
+                    "Spiele lässt sich nur der beim Datenbank-Update vorhandene letzte Cache-Stand übernehmen, " +
+                    "nicht nachträglich fehlende Vorabquoten rekonstruieren.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

@@ -117,6 +117,11 @@ class ApiFootballOddsTest {
                                 listOf(
                                     ApiFootballOddsValueDto("Over 2.5", "2.1"),
                                     ApiFootballOddsValueDto("Under 2,5", "1.8"),
+                                    ApiFootballOddsValueDto("Over 1.5", "1.9"),
+                                    ApiFootballOddsValueDto("Under 3.5", "1.7"),
+                                    ApiFootballOddsValueDto("Over 1.0", "1.9"),
+                                    ApiFootballOddsValueDto("Under 2.0", "1.8"),
+                                    ApiFootballOddsValueDto("Over 3.0", "1.7"),
                                     ApiFootballOddsValueDto("Over 2.25", "1.9"),
                                 ),
                             ),
@@ -144,13 +149,16 @@ class ApiFootballOddsTest {
 
         val quotes = normalizeApiFootballOdds(response, 123).quotes
 
-        assertEquals(9, quotes.size)
+        assertEquals(11, quotes.size)
         assertEquals(
             setOf("DOUBLE_CHANCE", "TOTAL_GOALS", "BOTH_TEAMS_SCORE", "DRAW_NO_BET"),
             quotes.map { it.market }.toSet(),
         )
         assertTrue(quotes.any { it.market == "TOTAL_GOALS" && it.outcome == "OVER_2.5" })
         assertTrue(quotes.any { it.market == "TOTAL_GOALS" && it.outcome == "UNDER_2.5" })
+        assertTrue(quotes.any { it.market == "TOTAL_GOALS" && it.outcome == "OVER_1.5" })
+        assertTrue(quotes.any { it.market == "TOTAL_GOALS" && it.outcome == "UNDER_3.5" })
+        assertFalse(quotes.any { it.market == "TOTAL_GOALS" && it.outcome.endsWith(".0") })
         assertFalse(quotes.any { it.outcome.contains("2.25") })
     }
 
@@ -195,7 +203,7 @@ class ApiFootballOddsTest {
     }
 
     @Test
-    fun integerGoalLineCountsExactTotalAsPushAndHalfLineDoesNot() {
+    fun rejectsIntegerGoalLinesAndKeepsHalfLines() {
         val analysis = sampleAnalysis().copy(
             scoreDistribution = listOf(
                 ScorelineProbability(0, 0, 0.40),
@@ -204,16 +212,18 @@ class ApiFootballOddsTest {
                 ScorelineProbability(3, 0, 0.0425),
             ),
         )
-        val integerLineTip = rankApiFootballValueTips(
+        val integerLineTips = rankApiFootballValueTips(
             quotes = listOf(
-                ApiFootballOddsQuote(123, "TOTAL_GOALS", "UNDER_2.0", 2.0, "Under Book"),
+                ApiFootballOddsQuote(123, "TOTAL_GOALS", "UNDER_1.0", 2.0, "Under Book"),
+                ApiFootballOddsQuote(123, "TOTAL_GOALS", "OVER_2.0", 2.0, "Over Book"),
+                ApiFootballOddsQuote(123, "TOTAL_GOALS", "UNDER_3.0", 2.0, "Under Book"),
             ),
             homeProbability = 0.50,
             drawProbability = 0.25,
             awayProbability = 0.25,
             fetchedAt = "2026-10-23T12:00:00Z",
             analysis = analysis,
-        ).single()
+        )
         val halfLineTip = rankApiFootballValueTips(
             quotes = listOf(
                 ApiFootballOddsQuote(123, "TOTAL_GOALS", "UNDER_2.5", 2.2, "Under Book"),
@@ -225,10 +235,7 @@ class ApiFootballOddsTest {
             analysis = analysis,
         ).single()
 
-        assertEquals(0.8075, integerLineTip.modelProbability, 0.000001)
-        assertEquals(0.15, integerLineTip.pushProbability, 0.000001)
-        assertEquals(0.61625, integerLineTip.selectionProbability, 0.000001)
-        assertEquals(0.3825, integerLineTip.expectedValue, 0.000001)
+        assertTrue(integerLineTips.isEmpty())
         assertEquals(0.9575, halfLineTip.modelProbability, 0.000001)
         assertEquals(0.0, halfLineTip.pushProbability, 0.000001)
     }
@@ -690,6 +697,7 @@ class ApiFootballOddsTest {
         kickoffAt = "${date}T19:00:00Z",
         matchDate = date.toString(),
         status = "SCHEDULED",
+        fullTimeResult = false,
         postponedOrCancelled = false,
         rescheduled = false,
         venue = null,

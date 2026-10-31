@@ -1146,12 +1146,20 @@ class LocalSyncRepository(
                             normalized.quotes.isEmpty() -> ApiFootballOddsCacheStatus.NO_SUPPORTED_QUOTES
                             else -> ApiFootballOddsCacheStatus.AVAILABLE
                         }
-                        dao.upsertApiFootballOddsCache(
+                        val fetchedAt = Instant.now().toString()
+                        val quotesJson = Gson().toJson(normalized.quotes)
+                        dao.saveApiFootballOddsSnapshot(
                             ApiFootballOddsCacheEntity(
                                 providerFixtureId = fixture.providerFixtureId,
-                                quotesJson = Gson().toJson(normalized.quotes),
+                                quotesJson = quotesJson,
                                 status = status,
-                                fetchedAt = Instant.now().toString(),
+                                fetchedAt = fetchedAt,
+                            ),
+                            ApiFootballOddsSnapshotEntity(
+                                providerFixtureId = fixture.providerFixtureId,
+                                fetchedAt = fetchedAt,
+                                quotesJson = quotesJson,
+                                status = status,
                             ),
                         )
                     } catch (exception: Exception) {
